@@ -9,11 +9,15 @@ surface:
     doctor | setup | refresh | search | context | capture_session
     | route_eval | temporal_import | state | temporal_eval
     | frame_eval | trust_import | trust_eval | selection_eval
-    | trace | trace_eval
+    | trace | trace_eval | loops | loop_eval | loop_rebuild
+    | loop_create | loop_import | remember | write_eval
+    | write_rebuild | record_show | action_show | write_history
 
 Retrieval finds evidence; later policy stages decide whether evidence
 may influence present action. Nothing here judges temporal validity,
-framing, trust, or open loops — those arrive in later stages.
+framing, trust, or open loops — those live in the bundled engine
+stages the bridge invokes (temporal, frame, trust, select, trace,
+loops, write).
 """
 
 from __future__ import annotations

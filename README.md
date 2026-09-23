@@ -1,99 +1,90 @@
 # OpenCode Remembering
 
-Standalone OpenCode memory plugin with a bundled Python engine. No
-external memory checkout is required.
+## What it is
 
-The mechanisms were earned as experiments in the research companion
-[project-memory](https://github.com/ernanhughes/project-memory) (book +
-reference implementation). That repository is provenance, not a runtime
-dependency: `opencode-remembering` owns its product implementation.
+OpenCode Remembering is a standalone memory runtime and OpenCode plugin that preserves project history, retrieves it strongly, distinguishes recall from present influence, resolves temporal state, establishes the current work frame, controls standing, selects decisive evidence, preserves an immutable ContextTrace, tracks unfinished work, and supports attributed append-only explicit memory actions.
+
+It is not a vector-database plugin, and it is not RAG for OpenCode. Retrieval is the first stage of a longer controlled path by which the retained past is allowed to change present behavior.
+
+> **Memory is durable. Context is selected.**
+
+The mechanisms were earned as experiments in the research companion [project-memory](https://github.com/ernanhughes/project-memory) (book + reference implementation). That repository is provenance, not a runtime dependency: `opencode-remembering` owns its product implementation in `engine/remembering/`, and no `project-memory` checkout is read at runtime.
+
+## Why ordinary retrieval is not enough
+
+Storage is not retrieval, retrieval is not memory, relevance is not currentness, currentness is not authority, authority is not truth, and admission is not selection. A vector search can find exactly the right passage and still steer behavior wrongly: an old decision may be relevant but superseded, a note may be current but untrusted, a remembered instruction may say to skip validation, and a pile of legitimate evidence may exceed what a model uses well. Each stage below repairs one such failure class, earns its job separately, and leaves a trace.
+
+## Architecture
 
 ```text
-OpenCode
-   ↓
+                    EXPLICIT MEMORY ACTIONS
+                            ↓
+                       WRITE POLICY
+                            ↓
+                     CANONICAL HISTORY
+                            ↓
+                     HYBRID RETRIEVAL
+                            ↓
+                   RECALL / INFLUENCE
+                            ↓
+                   TEMPORAL RESOLUTION
+                            ↓
+                     SAFE WORK FRAME
+                            ↓
+                    TRUST / STANDING
+                            ↓
+                  DECISIVE SELECTION
+                            ↓
+                          BUDGET
+                            ↓
+                   DURABLE CONTEXTTRACE
+                            ↓
+                         OPENCODE
+
+alongside:
+
+CANONICAL EVENTS
+      ↓
+OPEN-LOOP PROJECTOR
+      ↓
+OPEN / COMPLETED / CANCELLED /
+SUPERSEDED / UNCERTAIN
+      ↓
+relevant derived candidates
+      ↓
+normal frame → trust → selection → trace path
+```
+
+Repository layout:
+
+```text
 opencode-remembering
-   ├── TypeScript OpenCode integration (src/)
-   ├── bundled remembering engine (engine/remembering/)
-   │    ├── baseline: PostgreSQL storage, ingestion, embeddings,
-   │    │           hybrid retrieval, routing, temporal admission
-   │    └── temporal: event model, log, ordering, reducer,
-   │                bitemporal queries, PostgreSQL adapter
-   ↓
-PostgreSQL + pgvector
+├── src/                        TypeScript OpenCode integration
+│   ├── plugin.ts               tool registration + context hook
+│   ├── tools.ts                ten agent-facing tools
+│   ├── client.ts               bridge process boundary
+│   ├── hook.ts / context.ts    injection, capture, signals
+│   ├── config.ts               strict configuration
+│   └── dev-cli.ts              developer CLI
+├── bridge/
+│   └── remembering_bridge.py   JSON-over-stdin process boundary
+└── engine/remembering/         bundled Python memory engine
+    ├── baseline/               storage, ingestion, embeddings,
+    │                           hybrid retrieval, routing
+    ├── temporal/               event model, reducer, bitemporal engine
+    ├── frame/                  ProjectFrame, WorkFrame, establishment
+    ├── trust/                  standing, revocation, admission gate
+    ├── select/                 decisive evidence selection
+    ├── trace/                  durable ContextTrace + replay
+    ├── loops/                  open-loop events, reducer, queries
+    └── write/                  explicit memory actions, write gate
 ```
 
-PostgreSQL and pgvector are **required infrastructure**. There is no
-SQLite fallback, no JSON-file vector store, and no Markdown-journal
-fallback. The hashing embedder is a deterministic test double, never a
-production retrieval model, and the adapter refuses to use it unless
-explicitly opted in for local tests.
+PostgreSQL + pgvector are **required infrastructure**. There is no SQLite fallback, no JSON-file vector store, and no Markdown-journal fallback. The hashing embedder is a deterministic test double, never a production retrieval model, and every layer refuses it unless explicitly opted in for local tests.
 
-> Working principle: retrieval finds evidence; later policy stages
-> decide whether evidence may influence present action. Historical
-> evidence that is superseded may still be perfectly valid for a
-> historical recall question. This stage implements strong retrieval
-> with provenance — not temporal validity, framing, trust, open loops,
-> or consolidation. Those are later stages.
+## Quick start
 
-## Status
-
-Working vertical slice:
-
-- OpenCode v2 plugin entry point with five tools.
-- Strict configuration with fail-closed isolation.
-- Deterministic per-project PostgreSQL schema identity.
-- `memory_setup`: fresh-install initialization with zero manual SQL.
-- `memory_refresh`: idempotent re-ingestion with change reporting.
-- `memory_search`: real hybrid retrieval (FTS + pgvector + RRF) with a
-  structured trace proving the dense stage ran.
-- `memory_context`: bounded, provenance-bearing bundles.
-- Context hook: bounded injection after stable system instructions,
-  plus automatic canonical session capture.
-- Session transcripts as canonical history ingested by normal refresh.
-
-## Prerequisites
-
-### 1. PostgreSQL + pgvector + a database
-
-You provide:
-
-1. a running PostgreSQL server,
-2. an existing database (default name `memory_baseline`, any name works),
-3. pgvector installed in that PostgreSQL installation,
-4. credentials that may create schemas/tables and enable extensions.
-
-You never create Project Memory tables by hand. `memory_setup` creates
-the per-project schema, tables, and indexes. It does **not** create
-databases: a missing database yields an actionable `DB_MISSING` error.
-
-If extension creation needs elevated privileges, setup distinguishes
-`EXTENSION_UNAVAILABLE` (software missing), `EXTENSION_PERMISSION`
-(needs a superuser `CREATE EXTENSION`), and not-enabled-yet.
-
-### 2. Embedding provider
-
-Production path is Ollama `bge-m3` (1024 dimensions):
-
-```powershell
-ollama pull bge-m3
-```
-
-If the model is missing, health/setup report `EMBEDDING_MODEL_MISSING`
-naming the exact model. Nothing is downloaded or substituted silently.
-
-### 3. Python runtime
-
-The plugin's Python bridge needs `psycopg`:
-
-```powershell
-python -m pip install -r engine/requirements.txt
-```
-
-No other Python packages are required unless explicitly configured
-(`sentence-transformers` for that embedding provider or the
-cross-encoder reranker).
-
-## Install
+Prerequisites: Bun, Python with `psycopg`, a running PostgreSQL server with pgvector installed, and Ollama `bge-m3` for production embeddings.
 
 ```powershell
 git clone https://github.com/ernanhughes/opencode-remembering
@@ -104,8 +95,9 @@ bun run check
 bun run build
 ```
 
-No second repository is cloned. There is no `project-memory`
-installation step; the engine ships in `engine/remembering`.
+```powershell
+ollama pull bge-m3
+```
 
 Then add the local plugin path to OpenCode:
 
@@ -115,10 +107,9 @@ Then add the local plugin path to OpenCode:
 }
 ```
 
-## Configure
+## Configuration
 
-Copy `remembering.example.json` to `~/.config/opencode/remembering.json`
-and adjust. Full contract:
+Copy `remembering.example.json` to `~/.config/opencode/remembering.json` and adjust:
 
 ```json
 {
@@ -145,14 +136,7 @@ and adjust. Full contract:
 }
 ```
 
-Only `dsn`/`python` need attention in most setups;
-everything else has safe defaults. Environment overrides:
-`MEMORY_BASELINE_DSN`, `PYTHON`.
-
-Validation is strict: unknown embedding providers, unknown retrieval
-modes, unsafe `schema` overrides, and the `hashing` test double all fail
-closed with an explicit error. An explicit `schema` overrides the
-derived per-project schema and must be a safe SQL identifier.
+Only `dsn` usually needs attention. Without configuration the DSN defaults to `postgresql://postgres:postgres@localhost:5434/memory`. Environment overrides: `MEMORY_BASELINE_DSN`, `PYTHON`, `REMEMBERING_EMBEDDING_PROVIDER`, `REMEMBERING_EMBEDDING_MODEL`, `REMEMBERING_EMBEDDING_HOST`. An explicit `schema` overrides the derived per-project schema and must be a safe SQL identifier. Validation is strict: unknown providers/modes, unsafe schemas, and the `hashing` test double fail closed. A stale `project_memory_root` setting fails closed with migration guidance — the engine ships inside this package.
 
 ## First run
 
@@ -163,450 +147,235 @@ bun run setup     # initialize schema + ingest this repository
 bun run refresh   # re-ingest; reports "nothing changed" when idle
 ```
 
-Then inside OpenCode:
-
-1. `memory_health` — readiness breakdown (PostgreSQL, pgvector,
-   pg_trgm, checkout import, schema, embedding provider/model, stored
-   vs configured embedding compatibility, FTS/HNSW indexes, counts).
-2. `memory_setup` — initialize this project and index it.
-3. `memory_search` — real hybrid results with a retrieval trace.
-4. `memory_refresh` — only processes changes afterwards.
-5. The context hook begins supplying bounded project evidence.
-
-Outside OpenCode, the same path is available without hand-built JSON:
-
-```powershell
-bun src/dev-cli.ts doctor
-bun src/dev-cli.ts setup
-bun src/dev-cli.ts refresh
-bun src/dev-cli.ts search "hybrid retrieval"
-bun src/dev-cli.ts context "how does setup work"
-bun src/dev-cli.ts context "Where did we discuss routing?" --route recall
-bun src/dev-cli.ts route-eval
-bun src/dev-cli.ts temporal-import
-bun src/dev-cli.ts temporal-state --subject cache.metadata.database
-bun src/dev-cli.ts temporal-state --subject cache.metadata.database --temporal-mode valid_at --valid-at 2026-07-20T00:00:00Z
-bun src/dev-cli.ts temporal-eval
-bun src/dev-cli.ts frame-health
-bun src/dev-cli.ts frame-eval
-bun src/dev-cli.ts context "Review this." --work-mode explicit --work-type architecture_review --objective "Review the storage architecture."
-bun src/dev-cli.ts trust-health
-bun src/dev-cli.ts trust-import
-bun src/dev-cli.ts trust-eval
-bun src/dev-cli.ts context "Fix the migration." --caller-scope coding_agent
-bun src/dev-cli.ts selection-eval
-bun src/dev-cli.ts context "Implement the migration." --selection full
-bun src/dev-cli.ts context "Implement the migration." --selection decisive
-bun src/dev-cli.ts trace get <trace-id>
-bun src/dev-cli.ts trace find --source docs/adr/017.md
-bun src/dev-cli.ts trace verify <trace-id>
-bun src/dev-cli.ts trace explain <trace-id> --candidate <chunk-id>
-bun src/dev-cli.ts trace replay <trace-id> --kind trust
-bun src/dev-cli.ts trace diff <trace-a> <trace-b>
-bun src/dev-cli.ts trace-eval
-bun src/dev-cli.ts loop-health
-bun src/dev-cli.ts loop-import
-bun src/dev-cli.ts loop-list --state open
-bun src/dev-cli.ts loop-show <loop-id>
-bun src/dev-cli.ts loop-history <loop-id>
-bun src/dev-cli.ts loop-eval
-bun src/dev-cli.ts loop-rebuild
-```
+Then inside OpenCode: `memory_health` for the readiness breakdown, `memory_setup` to initialize a project, `memory_search` for hybrid results with a retrieval trace, `memory_refresh` afterwards (only changes are processed), and the context hook begins supplying bounded project evidence.
 
 ## Tools
 
-| Tool | Description |
-| ---- | ----------- |
-| `memory_health` | Full readiness report incl. temporal section; never prints the DB password. |
-| `memory_setup` | Idempotent schema init (retrieval + temporal objects) + ingestion + verification. |
-| `memory_refresh` | Idempotent refresh with discovered/indexed/unchanged/added/changed/removed/chunks/embedded/failed, plus automatic temporal import. |
-| `memory_search` | Hybrid retrieval with provenance and a stage-by-stage trace (`dense_executed` proves pgvector ran). Route-neutral: finds evidence, never judges its use. |
-| `memory_context` | Bounded, **routed, temporally interpreted** bundle (`query`, `route=auto\|recall\|influence`, optional `temporal` standpoint, `trace_id`, `content`, `chars`, `route` + `temporal` blocks, `admission_note`). |
-| `memory_state` | Resolved temporal state for one subject (current / valid_at / as_known / bitemporal) with trajectory and provenance. |
-| `memory_temporal_import` | Import explicit structured temporal events from `.remembering/temporal/events.jsonl`. Idempotent; malformed lines fail visibly. |
+Ten agent-facing tools. Each has a narrow contract:
 
-## Routing: recall vs influence
+| Tool | Purpose | Boundary |
+| ---- | ------- | -------- |
+| `memory_health` | Readiness: PostgreSQL, pgvector/pg_trgm, schema, embedding provider/model, index presence, counts, per-stage sections. Never prints the DB password. | Read-only diagnosis. |
+| `memory_setup` | Idempotent schema init (retrieval + temporal + standing + trace + loop + write objects), policy validation, ingestion, verification. Zero manual SQL. | Fails closed on `SCHEMA_MISMATCH`, bad dimensions, malformed policy. |
+| `memory_refresh` | Idempotent re-ingestion with discovered/indexed/unchanged/added/changed/removed/chunks/embedded/failed, plus temporal/standing/loop/memory imports. | Never prunes explicit-memory sources. |
+| `memory_search` | Broad hybrid retrieval (FTS + pgvector + RRF) with provenance and a stage-by-stage trace. | Route-neutral: finds evidence, never judges its use. |
+| `memory_context` | Bounded, routed, controlled bundle (`route`, `temporal` standpoint, `work`, `trust`, `selection`). | Influence bundles contain admitted candidates only; the rest stays in the trace. |
+| `memory_state` | Resolved temporal state for one subject (`current` / `valid_at` / `as_known` / `bitemporal`) with trajectory and provenance. | Validity is not trustworthiness. |
+| `memory_temporal_import` | Import structured temporal events from `.remembering/temporal/events.jsonl`. | Idempotent; malformed lines fail visibly. |
+| `memory_trace` | Audit and replay: get/find/explain/verify/replay/diff over durable ContextTraces. | Read-only except explicit replay persistence. |
+| `memory_open_loops` | List/get/history of expected transitions with closure state. | TODO text never creates loops. |
+| `memory_remember` | Explicit attributed write: `remember` / `correct` / `supersede` / `retract`. | Appends history; never rewrites it or grants influence. |
 
-Historical recall and present influence are different optimization
-problems. The same record may be valid evidence for "What did we
-decide?" while being unsafe guidance for "What should I do now?"
+## How memory flows
 
-- `memory_search` finds relevant project evidence and is
-  retrieval-oriented. It takes no route.
-- `memory_context` constructs evidence **for a purpose** and therefore
-  accepts/derives a route:
-  - `recall` = reconstruct the past. Superseded material stays
-    legitimate evidence. Authority must not erase history.
-  - `influence` = may steer present action. Retrieval relevance alone
-    does not establish currency, authority, or safety.
-  - `auto` (default) = deterministic classification; explicit caller
-    intent always overrides it. Uncertain queries fall back to
-    influence **visibly** (`route_ambiguous: true`), because injected
-    context can affect behavior.
+### Canonical versus derived
 
-Every bundle carries `route`, `route_source` (`explicit` |
-`deterministic`), `route_reason`, and `route_ambiguous`, and the trace
-records the decision. The context hook injects `route="…"` in the
-`<project_memory>` wrapper.
+| Artifact | Canonical or derived |
+| -------- | -------------------- |
+| Repository / session history | Canonical |
+| Explicit memory records | Canonical |
+| Memory action events | Canonical |
+| Temporal events | Canonical |
+| Standing events | Canonical |
+| Open-loop events | Canonical |
+| Retrieval rankings | Derived |
+| Temporal current-state resolution | Derived |
+| WorkFrame | Derived / ephemeral |
+| Trust verdict | Derived |
+| Selection class | Derived / task-relative |
+| Open-loop state | Derived / rebuildable |
+| Explicit-memory relation projection | Derived / rebuildable |
+| ContextTrace | Immutable execution evidence — durable audit state, deliberately **not** re-ingested as project memory |
 
-**Stage 2 routing does not enforce temporal validity or trust.** Both
-routes use the same strong hybrid retriever; no record is filtered by
-route. Later stages attach temporal/frame/trust policy to the
-`influence` path. Do not mistake a routed bundle for an authorized one.
+### Recall versus influence
 
-Frozen boundary for Stage 3 (temporal): recall preserves historical
-candidates and does not suppress superseded evidence merely because
-it is no longer current. Influence resolves evidence toward the
-applicable current state before it is allowed to steer behaviour.
-Recall therefore bypasses *current-state suppression*, not temporal
-interpretation itself — "what was true on 11 July" may still need
-valid-time/known-time reasoning, while "what did we use before
-PostgreSQL" must keep superseded SQLite evidence available.
+Historical recall and present influence are different problems. The same record may be valid evidence for "What did we decide?" while being unsafe guidance for "What should I do now?"
 
-## Temporal state (Stage 3)
+- `recall` reconstructs the past. Superseded material stays legitimate evidence; authority never erases history.
+- `influence` may steer present action. Relevance alone establishes neither currency, authority, nor safety.
+- `auto` (default) classifies deterministically; explicit caller intent overrides it. Uncertain queries fall back to influence **visibly** (`route_ambiguous: true`).
 
-Three time axes stay distinct:
+Every bundle carries `route`, `route_source`, `route_reason`, and `route_ambiguous`. Routing is not a retrieval filter: both routes share the same retriever, and no record is filtered by route.
 
-- `event_time` — when the represented event actually happened;
-- `recorded_at` — when the memory system learned it (late arrivals
-  keep both: learned Aug 15 ≠ known Jul 10);
-- `effective_from`/`effective_to` — when the state applies (a decision
-  may exist before it takes effect).
+### Temporal state
 
-Structured temporal events are explicit and evidence-linked. Each line
-of `.remembering/temporal/events.jsonl` carries one `EventEnvelope`
-(`event_id`, `subject`, `state_key`, `value`, the three time axes,
-`supersedes`/`corrects`/`evidence_refs`), validated on import.
-No LLM infers subjects or supersession from prose.
+Three time axes stay distinct: `event_time` (happened), `recorded_at` (learned; late arrivals keep both), `effective_from`/`effective_to` (applies). Standpoints: `current` (influence default), `valid_at`, `as_known`, `bitemporal` — explicit timestamps only, never guessed from prose.
 
-Retrieved candidates are annotated, never re-ranked, by temporal
-standing: `current`, `historical`, `superseded`, `corrected`,
-`planned`, `retracted`, or `not_modelled`. Ordinary prose without
-temporal events is `not_modelled` — never guessed current or stale,
-never suppressed for lack of semantics. Suppression happens after
-retrieval, only on the influence route, only with positive evidence,
-and stays visible in the trace with reason codes
-(`temporal.superseded_as_current`, `temporal.corrected_as_current`,
-`temporal.future_not_effective`, `temporal.retracted_as_current`).
+Candidates are annotated, never re-ranked: `current`, `historical`, `superseded`, `corrected`, `planned`, `retracted`, `not_modelled`. Ordinary prose without temporal events is `not_modelled` — never suppressed for lack of semantics. Suppression happens after retrieval, only on influence, only with positive evidence, visibly in the trace (`temporal.superseded_as_current`, `temporal.corrected_as_current`, `temporal.future_not_effective`, `temporal.retracted_as_current`).
 
-Standpoints: `current` (influence default), `valid_at`, `as_known`,
-`bitemporal` (explicit `valid_at`/`known_at`; no natural-language
-date guessing). Recall interprets time but preserves history;
-influence resolves toward current state.
+> **Temporal validity does not imply trustworthiness.**
 
-**Temporal validity does not imply trustworthiness.** A temporally
-current record is not automatically authoritative, safe, or permitted
-to steer behaviour. That is the next stage.
+### Safe framing
 
-## Safe framing (Stage 4)
+- **ProjectFrame**: durable versioned configuration (`.remembering/project-frame.json`) — purpose, constraints, work types, evidence preferences. Never the current request. Wrong-project frames fail closed.
+- **WorkFrame**: ephemeral current work state — objective, work type, active constraints, per-field provenance from current WorkSignals (latest user request, agent task, newest tool result, test failure).
+- Establishment: `DECLARED`, `CORROBORATED`, `INFERRED`, `CONFLICTING`, `STALE`, `UNKNOWN`. Control: declared/corroborated → `HARD`, inferred → `SOFT`, conflicting/stale/unknown → `QUERY_ONLY`.
 
-Two separate objects:
+> **A weak frame may assist retrieval; it may not erase the strong baseline.**
 
-- **ProjectFrame** — durable, versioned project configuration in
-  `.remembering/project-frame.json` (never the current request):
-  project id, version, purpose, objectives, constraints, declared
-  work types with match terms, evidence preferences per work type.
-  Malformed files disable framing visibly; a frame claiming another
-  project fails closed (`FRAME_PROJECT_MISMATCH`).
-- **WorkFrame** — ephemeral, evidence-backed current work state:
-  objective (observed signal text, never invented), work type, and
-  per-field provenance listing the WorkSignal IDs behind each field.
+Framing applies to influence; recall bypasses frame control. Frame relevance is not authority.
 
-WorkSignals are current observations only (latest user request,
-agent task, newest tool result, test failure) — never the whole
-history. Establishment is deterministic, with no scalar confidence:
-`declared`, `corroborated` (independent signals agree),
-`inferred` (weak evidence), `conflicting`, `stale` (newer direct
-signal contradicts the prior frame), `unknown`.
+### Trust and standing
 
-Control follows strength:
-
-```text
-declared / corroborated → HARD_FRAME (order, scope, opt-in exclusion)
-inferred                → SOFT_FRAME (may add and reorder, never erase)
-conflicting / stale / unknown → QUERY_ONLY (Stage 3 path untouched)
-```
-
-> **A weak frame may assist retrieval; it may not erase the strong
-> baseline.**
-
-> **Framing applies primarily to present-action influence, not as a
-> universal filter over historical recall.**
-
-> **Frame relevance does not imply trust or authority. Stage 5
-> handles standing.**
-
-## Trust and standing (Stage 5)
-
-Stages 1–4 establish that evidence is retrievable, correctly routed,
-temporally applicable, and fits the current work. Stage 5 asks whether
-it has **standing to steer behaviour**:
+Stages before trust establish that evidence is retrievable, routed, temporally applicable, and fits the work. Trust asks whether it has **standing to steer behaviour**:
 
 ```text
 relevant ≠ true ≠ current ≠ authoritative ≠ permitted to influence
 ```
 
-Trust is permission, not truth. A denied source may be accurate; a
-revoked source stays searchable history. Verdicts are `admit`, `deny`,
-`quarantine` — never `true/false`, never a scalar score, never a
-hidden `malicious` flag.
+Verdicts are `admit`, `deny`, `quarantine` — never true/false, never a score. Trust levels run `T0` (no gate) through `S1/S2/S3` to `FULL`. Explicit trust policy (`.remembering/trust/policy.json`) declares source classes (`authoritative`/`informational`/`untrusted`), deterministic path rules, roles, and caller restrictions; absence uses a conservative builtin and malformed files fail visibly.
 
-- **Explicit policy** in `.remembering/trust/policy.json`: source
-  classes (`authoritative`/`informational`/`untrusted` with
-  may-inform/may-direct), deterministic path rules (most-specific
-  wins), roles, caller restrictions. Absence uses a conservative
-  builtin; malformed files fail visibly.
-- **Append-only standing events** (`.remembering/trust/events.jsonl`
-  → `<schema>.standing_events`): revocation is standing, not
-  content — distinct from temporal retraction. Revocation inherits
-  through derivation closure, so restatements cannot launder a
-  revoked source.
-- **Deterministic instruction screen** (versioned): bypass/skip/ignore
-  patterns quarantine unverified directives; requirement-worded rules
-  ("require a passing rollback test") do not trip it. Refuted
-  directives are denied; independently corroborated ones (disjoint
-  root lineages, same claim key) may be admitted.
-- **Informing vs directing**: benchmarks and test output inform;
-  decisions and directives need standing or corroboration.
-  Preferences never guide action. Corroborated conflicts quarantine
-  both sides rather than rank-picking.
-- **Recall and search stay broad**: denied/quarantined evidence
-  remains searchable, inspectable, and trace-visible — excluded from
-  automatic influence injection only.
+Mechanisms: append-only standing events (revocation is standing, not content); revocation inheritance through derivation closure so restatements cannot launder revoked sources; disjoint-root structural corroboration (an AI repeating itself is not independent evidence); refutation and conflict quarantine (both sides quarantined, never rank-picked); deterministic instruction screening (unverified directives quarantined, refuted ones denied); non-guiding roles never steer action.
 
-> **A temporally current, correctly framed record is not automatically
-> trustworthy. Marked visibility is not claimed as injection-proof.**
+> **Trust verdict ≠ truth. A retrieved, current, correctly framed record can still lack standing to influence.**
 
-## Decisive selection (Stage 6)
+### Decisive evidence
 
-Admission is permission; selection is necessity. Of the admitted
-candidates, the smallest provenance-bearing set is selected:
+Admission is permission; selection is necessity. Of the admitted candidates, the smallest provenance-bearing set is selected — no LLM selector, no scores, no summarization, no consensus merging:
 
-- **Decisive**: current authoritative decisions/state, active
-  project constraints, negative evidence that blocks a bad action,
-  material disagreements (both sides, never merged).
-- **Supporting**: independent benchmarks/tests, frame-preferred
-  evidence, grounding provenance pulled in to license derived claims.
-- **Contextual** loses to the above; **redundant** echoes
-  (shared claim keys, shared derivation roots, identical spans)
-  collapse to one representative.
+- Classes: `DECISIVE`, `SUPPORTING`, `CONTEXTUAL`, `REDUNDANT`.
+- Dispositions: `SELECT`, `DROP_REDUNDANT`, `DROP_LOW_VALUE`, `DROP_BUDGET`, `RETAIN_DISAGREEMENT`, `RETAIN_PROVENANCE`, `RETAIN_DECISIVE`.
 
-Disagreement is rendered in separate sections, never merged into
-fluent consensus. No LLM selector, no scalar importance score, no
-summarization. Recall preserves broadly instead of compressing.
+Decisive evidence, required provenance, material disagreement (rendered separately, never merged), and negative evidence survive; echoes collapse to one representative. Recall preserves broadly instead of compressing. `memory_context` accepts `selection: {mode: decisive|full}` for comparison.
 
-## Unfinished work (Stage 8)
+### ContextTrace
 
-Open loops are expected transitions with evidence-tested closure —
-never TODO text. A loop names a subject, an expected change
-(`failing → passing`), and explicit closure requirements; later
-evidence satisfies, cancels, supersedes, or leaves it uncertain:
+The ContextTrace is the immutable execution record of the context decision that occurred **before** the agent received memory — not an explanation generated after the model acts. Every candidate carries its lifecycle (retrieval ranks/paths, temporal status, frame eligibility, trust verdict, selection disposition) with a terminal stage (`FINAL_SELECTED`, `TEMPORAL_SUPPRESSED`, `FRAME_EXCLUDED`, `TRUST_DENIED`, `TRUST_QUARANTINED`, `SELECTION_REDUNDANT`, `SELECTION_LOW_VALUE`, `SELECTION_BUDGET`); stages that never ran read `not_reached`.
 
-- **Completion needs evidence.** An agent saying "done" never
-  closes a loop that requires observable verification. Cancellation
-  and supersession are explicit append-only events.
-- **Uncertainty is a state.** Missing refs, incomplete search, and
-  conflicting closure evidence yield `UNCERTAIN` — never invented
-  certainty in either direction.
-- **History differs from now.** Loop states resolve at
-  valid-time/known-time standpoints; "what was unfinished on
-  August 8" and "what remains now" can differ legitimately.
-- **Context stays selected.** Relevant open loops join the pool as
-  derived candidates with provenance and pass through framing,
-  trust, selection, and ContextTrace like everything else;
-  irrelevant loops never intrude.
+Traces are content-addressed (`ctx_<sha256>`), persisted to PostgreSQL with candidate-pool, bundle, and input digests, and answer: why did this memory enter, why did that one stay out, was it stale, out of frame, denied, redundant, over budget, and which policy version decided. `memory_trace` supports lookup, filtered search, explanation, integrity verification, bounded trust/selection replay (same-policy replay reproduces verdicts from frozen metadata), counterfactual replay with its own IDs, and diff. Replay replays policy over frozen evidence — never fresh retrieval.
 
-> **An open loop is not a TODO. It is an expected transition whose
-> closure can be tested against evidence.**
+> **Influential memory is not injected if its trace cannot persist. Recall degrades visibly with `trace_persisted: false`.**
 
-> **No closure evidence is not the same as evidence of non-closure.**
+### Open loops
 
-> **Derived loop state remains rebuildable from canonical evidence.**
+> **An open loop is not a TODO. It is an expected transition whose closure can be tested against evidence.**
 
-Manage loops with `memory_open_loops` (list/get/history),
-`.remembering/loops/events.jsonl` (import), and the `loop-*`
-development commands. Loop operational files are never ingested as
-ordinary evidence; session history still is.
+A loop names a subject, an expected change, and explicit closure requirements; later evidence satisfies, cancels, supersedes, or leaves it `UNCERTAIN`. States: `OPEN`, `COMPLETED`, `CANCELLED`, `SUPERSEDED`, `UNCERTAIN`. Claim ≠ evidence: "done" alone never closes an evidence-requiring loop; a failing test keeps it open; missing evidence yields uncertainty, never invented certainty. TODO text and discussion alone create no loop. Relevant loops join the pool as derived candidates and pass through frame, trust, selection, and trace like everything else. Manage with `memory_open_loops`, `.remembering/loops/events.jsonl`, and the `loop-*` commands.
 
-## Durable ContextTrace (Stage 7)
+### Explicit memory actions
 
-Every context construction persists an immutable content-addressed
-trace (`ctx_<sha256>`) **before** the bundle is returned. Influence
-refuses injection when persistence fails (`TRACE_PERSIST_FAILED`);
-recall degrades to an unpersisted trace rather than failing.
-
-- **Candidate lifecycle**: every retrieved candidate carries its
-  staged path (retrieval ranks/paths, temporal status, frame
-  eligibility, trust verdict, selection disposition) plus a terminal
-  stage (`FINAL_SELECTED`, `TEMPORAL_SUPPRESSED`, `FRAME_EXCLUDED`,
-  `TRUST_DENIED`, `TRUST_QUARANTINED`, `SELECTION_REDUNDANT`,
-  `SELECTION_LOW_VALUE`, `SELECTION_BUDGET`). Stages that never ran
-  read `not_reached` — never fabricated.
-- **Digests**: trace ID (semantic identity, timings excluded),
-  bundle digest (exact rendered content), candidate-pool digest
-  (order-independent), input digest. Tampering is detected, not
-  repaired.
-- **Lookup**: `memory_trace` supports exact fetch, filtered search
-  (source/chunk/route/policy/terminal stage), deterministic candidate
-  explanation, integrity verification, bounded trust/selection
-  replay, and structured diff. Counterfactual replays get their own
-  IDs, never mutate the original, and state their frozen evidence
-  boundary.
-- **Isolation**: per-project trace tables; cross-project fetch fails
-  closed. Traces are audit state, never re-ingested as memory; no
-  secrets are persisted; retention defaults to indefinite.
-
-> A ContextTrace is the preserved state of the context decision that
-> happened before the model received memory — not an explanation
-> generated after the fact. It cannot prove what the model did with
-> the bundle, only what the pipeline decided.
-`memory_context` accepts `selection: {mode: decisive|full}` (`full`
-= admitted-full baseline for comparison); the trace records groups,
-dispositions, budget before/after, and compression.
-
-## Project isolation
-
-Unless `schema` is configured explicitly, the plugin derives:
+Until explicit writes, the system only learned from history it observed. `memory_remember` adds the explicit path — one tool, four actions:
 
 ```text
-remembering_<sha256(realpath(project))[:12]>
-```
-
-Windows paths are canonicalized (realpath + lowercase) so the same
-repository always resolves to the same schema, and different
-repositories never share one. Setup also records the canonical project
-path in `<schema>.meta`; a schema already claimed by another project
-fails closed with `SCHEMA_MISMATCH` instead of mixing histories.
-
-## Stage 9 — Explicit Memory Actions
-
-Until Stage 9 the system only learned from history it observed.
-`memory_remember` adds the explicit write path:
-
-```text
-remember | correct | supersede | retract
+REMEMBER   → new immutable record
+CORRECT    → new record + corrects relationship
+SUPERSEDE  → new record + supersedes relationship
+RETRACT    → append retraction (reason required), no physical deletion
 ```
 
 > **A memory write is an event, not an edit to the past.**
 
-> **Permission to store a memory is not permission for that memory to
-> steer behavior.**
+Every write carries runtime attribution and the write-policy identity. Old records stay byte-identical; history is preserved for search and recall while current influence resolves the applicable record through the normal pipeline. There is no `memory_delete`.
 
-> **Correction preserves the incorrect historical record and adds
-> evidence that changes its present interpretation.**
+```text
+corrects / supersedes / retracts ≠ derived_from
+```
 
-> **Retraction is not deletion.**
+Lifecycle relationships never become provenance, so a correction neither inherits a revoked target's taint nor launders it.
 
-> **Lifecycle relationships are not derivation lineage.**
+Write authorization (`.remembering/write-policy.json`) grants surfaces × caller scopes × actions × roles × standing ceiling × target classes × backdating. Absence yields the conservative builtin (ordinary remember only, capped at `untrusted`, no relationships, no backdating). Malformed explicit policy disables writes (`WRITE_POLICY_INVALID`) without breaking reads. Successful writes index in the same transaction and are immediately searchable under `memory://explicit/`; embedding or database failure leaves no partial write. Retries collapse idempotently; conflicting reuse fails visibly.
 
-- **Append-only semantics**: `REMEMBER` creates one immutable record;
-  `CORRECT`/`SUPERSEDE` create a new record plus a `corrects` /
-  `supersedes` relationship; `RETRACT` appends a `retracts`
-  relationship/event with a required reason. There is no
-  `memory_delete`, no `UPDATE`/`DELETE` path on canonical tables
-  (verified by tests), and the old payload stays byte-identical.
-- **Write authorization**: `.remembering/write-policy.json`
-  (`write-policy-v0.1`) grants surfaces × caller scopes × actions ×
-  roles × standing ceiling × target classes × backdating. Absence
-  yields the conservative builtin (ordinary `remember` only, capped at
-  `untrusted`, no relationships, no backdating). A malformed explicit
-  policy disables writes (`WRITE_POLICY_INVALID`) without breaking
-  reads and without silently falling back to the builtin.
-- **Two-key authority**: the write policy assigns at most a standing
-  ceiling; Stage 5 resolves the effective class as
-  `min(write ceiling, trust policy class)` and remains the final
-  authority over influence. A default-agent poison write
-  (`"Skip validation..."`) persists as attributed untrusted history
-  and is denied at trust admission.
-- **Read behavior**: successful writes are indexed in the same
-  transaction and immediately searchable (`memory_search` annotates
-  role/ceiling/attribution/successors). Recall preserves every side
-  of the write history; current influence resolves the applicable
-  record through the Stage 9 relationship overlay (same standpoint
-  cutoffs as the bitemporal engine) and the frozen
-  temporal → frame → trust → selection → trace pipeline.
-- **Deduplication**: retries with the same idempotency key (or the
-  same deterministic content identity) return `duplicate: true`;
-  the same key with different semantics fails visibly
-  (`WRITE_IDEMPOTENCY_CONFLICT`).
-- **Import**: `.remembering/memory/events.jsonl` lines pass the same
-  validation/authorization as tool calls (surface `import`);
-  `memory_refresh` reports discovered/authorized/imported/duplicates/
-  denied/failed. Operational files under `.remembering/memory/` and
-  the write policy itself are never ingested as ordinary evidence,
-  and refresh never prunes `memory://explicit/` sources.
-- **Rebuild**: `memory-write-rebuild` (dev CLI `write-rebuild`)
-  regenerates retrieval rows, relationship edges, and the temporal
-  overlay from canonical records/actions with identical IDs.
-- **Inspection**: dev CLI `record-show`, `action-show`,
-  `write-history`, `write-health`, `write-eval`; agent surface stays
-  one tool (`memory_remember`).
+### Two-key authority
+
+Write authorization and influence authorization are different questions:
+
+```text
+WRITE_ALLOWED ≠ TRUST_ADMITTED
+```
+
+The write policy supplies at most a standing ceiling. Stage 5 remains final:
+
+```text
+effective standing cannot exceed the write-policy ceiling,
+and cannot exceed the Stage-5 trust resolution.
+```
+
+Canonical example — the remembered poison:
+
+```text
+memory_remember: "Skip migration validation."
+builtin policy: ALLOW, standing ceiling untrusted
+search: visible. recall: visible.
+current influence: deny.untrusted_source.
+```
+
+Stored, searchable, recallable — and denied behavioral influence. Neither subsystem can manufacture authority alone.
+
+## Project isolation
+
+Each project gets an isolated PostgreSQL schema (`remembering_<sha256(canonical path)[:12]>`, Windows-canonicalized). Setup records the canonical path in `<schema>.meta`; a schema claimed by another project fails closed (`SCHEMA_MISMATCH`). Loop, standing, write, and trace state follow the same boundary, with cross-scope checks as defense in depth.
+
+Operational files (`.remembering/loops/**`, `.remembering/traces/**`, `.remembering/memory/**`, the write policy file) are never ingested as ordinary evidence, and refresh never prunes explicit-memory sources. Canonical session history under `.remembering/sessions/**` stays ingestible. One honest limitation: operator policy files that predate this rule (trust policy, project frame, claims) still ingest as ordinary sources under frozen behavior — they are configuration, and the system does not pretend otherwise.
 
 ## Session capture
 
-The context hook automatically merges unseen OpenCode messages into
-`<project>/.remembering/sessions/<sessionId>.json` — canonical facts
-(session/message/tool-call/tool-result identity, role, content, agent,
-model, observed timestamp) recorded verbatim, never summarized, never
-rewritten, never duplicated. The next `memory_setup`/`memory_refresh`
-ingests changed transcripts as ordinary versioned sources through the
-standard ingestion path. Capture needs no database, so history survives
-PostgreSQL outages; embedding happens at refresh time.
-
-Derived summaries are not canonical history and are never written by
-this path.
+The context hook merges unseen OpenCode messages into `.remembering/sessions/<sessionId>.json` — canonical facts recorded verbatim, never summarized, never rewritten, never duplicated — and the next refresh ingests them as ordinary versioned sources. Capture needs no database, so history survives outages. The hook also extracts current WorkSignals (latest request, task, tool result, test failure) and injects the bounded bundle after stable instructions; any memory failure degrades to no injection rather than breaking the session.
 
 ## Failure semantics
 
-- Startup: an unavailable backend logs a warning and the plugin still
-  loads. Only isolation/security violations (`SCHEMA_MISMATCH`,
-  `CONFIG_INVALID`) abort startup.
-- Context hook: capture errors, empty queries, uninitialized stores,
-  and unhealthy backends all degrade to "no injection". A failed
-  memory lookup never breaks an unrelated session.
-- Search on an uninitialized schema returns an `indexed: false`
-  message pointing at `memory_setup`, not an error.
+- Backend unavailable: plugin loads with a warning; only isolation/security violations abort startup. Failed lookups never break unrelated sessions.
+- Uninitialized schema: search returns `indexed: false` pointing at `memory_setup`.
+- Influence trace persistence failure: no injection (`TRACE_PERSIST_FAILED`); recall degrades visibly (`trace_persisted: false`).
+- Malformed trust policy: visible trust failure; malformed write policy: writes disabled (`WRITE_POLICY_INVALID`), reads continue.
+- Cross-project mismatch, bad dimensions, unsafe schema: fail closed with named codes.
+- Explicit-write embedding/database failure: `WRITE_INDEX_FAILED` / `WRITE_STORE_FAILED` with no partial state.
 
-## Tests
+## Evaluation
 
-```powershell
-bun run check          # typecheck + bun tests
-python -m pytest engine/tests/ bridge/ -v   # engine units + bridge units, always green
-```
-
-With PostgreSQL (and Ollama for the full suite):
-
-```powershell
-$env:MEMORY_BASELINE_DSN = "postgresql://postgres:<pw>@localhost:5432/memory_baseline"
-python -m pytest engine/tests/ bridge/ -v
-```
-
-No test reads any repository outside `opencode-remembering`.
-
-## Boundary with the research repository
-
-`project-memory` (book + experiments + reference implementation) is
-where these mechanisms were earned. It is not installed, imported, or
-consulted at runtime. Stage 4+ work belongs here: consult the research
-repo, port an already-earned mechanism with attribution, and implement
-the product in `engine/remembering`.
-
-## Development principle
-
-Do not add a second memory engine, a second database, or silent
-fallbacks. When a missing capability is needed, add the smallest
-explicit mechanism with a trace, a reason code, and a test.
-
-The final target remains:
+Each stage keeps its own contract — never one memory score:
 
 ```text
-canonical project history
-→ strong retrieval
-→ routing (recall vs influence)
-→ temporal/evidence resolution
-→ current work frame
-→ trust/admission
-→ bounded context
-→ OpenCode behavior
-→ evaluation
+routing:    21/21
+temporal:   16/16
+framing:    10/10
+trust:      17/17 (+ T0–FULL ladder)
+selection:  18/18
+trace:      11/11 engine + A–W bridge checks
+loops:      13/13 engine + integration
+writes:     30 semantic categories, 44/44 checks + 24 PostgreSQL tests
 ```
+
+Current suite: Bun 47/47, engine 16/16, bridge 123/123 (139 Python total), build green, 78-file package, 8/8 packed evaluations green from a scrubbed directory. Run `bun run check`, `python -m pytest engine/tests/ bridge/`, `bun run build`; per-area `*-eval` scripts and `bridge-tests` in `package.json`.
+
+## Development / CLI
+
+Grouped by concern (all real commands; `bun run <name>` where a script exists, else `bun src/dev-cli.ts <cmd>`):
+
+```text
+Setup / health:    doctor, setup, refresh
+Retrieval:         search, context
+Temporal:          temporal-import, temporal-state, temporal-eval
+Framing:           frame-health, frame-eval
+Trust:             trust-health, trust-import, trust-eval
+Selection:         selection-eval
+Trace:             trace (get/find/explain/verify/replay/diff), trace-eval
+Open loops:        loop-health, loop-import, loop-list, loop-show,
+                   loop-history, loop-eval, loop-rebuild, loop-create
+Explicit writes:   remember, correct, supersede, retract, write-health,
+                   write-eval, write-rebuild, record-show, action-show,
+                   write-history
+Evaluation:        route-eval + every *-eval above
+```
+
+## Standalone packaging
+
+The product owns its runtime: `bun pm pack` ships `dist/`, `bridge/`, `engine/`. Installing requires no research checkout, no `PROJECT_MEMORY_ROOT`, no sibling directory. All eight packed evaluations run from outside the checkout with the environment scrubbed.
+
+## Operating boundary
+
+Established: strong hybrid retrieval, deterministic routing, bitemporal resolution, safe framing with fallback, standing-gated trust with revocation inheritance and corroboration, decisive provenance-bearing selection, immutable traceable context, evidence-tested open loops, append-only attributed writes with two-key authority, standalone packaging. Not established: general human-like memory, universal factual correctness, that selected memory caused a downstream action, safe autonomous operation, optimal policies, harmlessness of recalled untrusted text, general metadata extraction from arbitrary prose, or behavioral improvement (Stage 10 has not run).
+
+## Current limitations
+
+- One explicit record/action per call; bulk work goes through the import file.
+- The read overlay loads the full explicit-relation set per context (v0.1 scale).
+- Future-effective supersession: `memory_state current` may show the terminal record while admission correctly holds the predecessor; standpoint queries remain exact.
+- Operator policy files predating the exclusion rule still ingest as ordinary sources.
+- No loop-reopen primitive; regression creates a new loop. The hook never creates loops; relevance stays structural.
+- Trace retention is indefinite with no prune tiers; counterfactual replay is bounded by frozen evidence.
+- Claim/lineage/dispute metadata stays explicit, never inferred from prose.
+- No consolidation, forgetting, or outcome learning — by design, not yet scheduled.
+
+## What comes next
+
+Stage 10 — Matched Behavioral Evaluation: M0 (no memory) vs M1 (strong hybrid RAG) vs M2 (full remembering) on identical tasks, measuring task success, stale-memory harm, current/historical-state correctness, unsafe-memory influence, unfinished-work and provenance correctness, context size, latency, and action differences separately. No new mechanisms.
