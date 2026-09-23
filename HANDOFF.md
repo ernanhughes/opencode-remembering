@@ -131,3 +131,21 @@ for subprocess/legacy tokens. Eval commands run native fixture evaluations
 Validation: 121 tests pass, tsc clean, build clean, git diff --check clean.
 Migration Python -> TypeScript is complete. Next: product hardening (install,
 configuration, live project use, performance, memory behavior).
+
+## Health/readiness contract fix
+
+Root cause: doctorBaseline() built the report with ok:false and never recomputed
+it, so a healthy native runtime still reported ok=false (CLI exit 1).
+
+Fix: src/engine/readiness.ts (pure readiness calculus) + doctorBaseline() now sets
+ok/readiness/message from probed state; nativeDoctor() folds subsystem sections
+(trust/write policy validity, store readiness, loop projection errors) into a
+whole-product readiness. Fresh DB returns ok=false/NOT_INITIALIZED without throwing;
+SCHEMA_MISMATCH and DIMENSION_MISMATCH stay fail-closed throws. Added readiness
+codes: HEALTHY, NOT_INITIALIZED, BACKEND_UNREACHABLE, EXTENSION_MISSING,
+EMBEDDING_UNAVAILABLE, DIMENSION_MISMATCH, SCHEMA_MISMATCH, POLICY_INVALID,
+SUBSYSTEM_FAILURE. DSN redaction now preserves user/host and redacts only the
+password. Self-check shows database endpoint + readiness code.
+
+Note: a stale session-level MEMORY_BASELINE_DSN (port 5434) can shadow the
+machine-level value (port 5432); env precedence is unchanged by design.

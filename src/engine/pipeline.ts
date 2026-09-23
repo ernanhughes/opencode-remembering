@@ -875,7 +875,7 @@ export class RememberingEngine {
     const writeCounts = await writeStore.counts();
     const { policy: writePolicy, valid: writeValid, error: writePolicyError } = await loadWritePolicy(this.options.projectDirectory);
     const countBy = (state: string) => loopViews.filter((v) => v.state === state).length;
-    return {
+    const result: Record<string, unknown> = {
       ...baseline,
       native: true,
       engine_root: "typescript:src/engine",
@@ -976,6 +976,41 @@ export class RememberingEngine {
         last_action_at: writeCounts.lastActionAt,
       },
     };
+    // Whole-product readiness: baseline gates everything, then policies,
+    // then subsystem stores. No memory semantics change here.
+    const { computeProductReadiness } = await import("./readiness");
+    const baselineReadiness = (baseline["readiness"] as { code: string; reasons: string[] } | undefined) ??
+      (baseline["ok"] === true
+        ? { code: "HEALTHY", reasons: [] }
+        : { code: "SUBSYSTEM_FAILURE", reasons: ["baseline not ready"] });
+    const product = computeProductReadiness(
+      {
+        ok: baseline["ok"] === true,
+        code: baselineReadiness.code as import("./readiness").ReadinessCode,
+        reasons: baselineReadiness.reasons,
+      },
+      {
+        temporalReady: (temporalHealth as { storeReady?: boolean }).storeReady === true,
+        standingReady: true,
+        trustPolicyValid: trustValid,
+        trustPolicyError: trustError,
+        traceReady: true,
+        loopsReady: loopError === undefined,
+        loopsError: loopError,
+        writesReady: true,
+        writePolicyValid: writeValid,
+        writePolicyError: writePolicyError,
+        frameError: frame.frameError,
+      },
+    );
+    result["ok"] = product.ok;
+    result["readiness"] = { code: product.code, reasons: product.reasons };
+    if (product.ok) {
+      result["message"] = baseline["message"] ?? "native Remembering engine is ready.";
+    } else if (product.code !== ((baseline["readiness"] as { code?: string } | undefined)?.code ?? "")) {
+      result["message"] = `${product.code}: ${product.reasons.join("; ")}`;
+    }
+    return result;
   }
 
   // -- File imports (trust / loops / explicit memory) --------------------------

@@ -5,6 +5,7 @@ import type { Pool } from "pg";
 import { checkOllamaModel, buildEmbedder, type EmbeddingSpec } from "./embeddings";
 import { EngineError, redactDsn } from "./errors";
 import { extensionStatus, withClient } from "./db";
+import { computeBaselineReadiness } from "./readiness";
 import { ENGINE_VERSION, readProjectMeta } from "./storage";
 
 export type BaselineDoctorOptions = {
@@ -139,6 +140,32 @@ export async function doctorBaseline(pool: Pool, options: BaselineDoctorOptions)
       "CONFIG_INVALID",
       `embedding provider ${JSON.stringify(embedding.provider)} is not supported by the TypeScript engine; use "ollama".`,
     );
+  }
+
+  // Explicit readiness calculation: every field above was probed, so derive
+  // ok from actual state instead of leaving the initial false in place.
+  const readiness = computeBaselineReadiness({
+    postgresReachable: report["postgres_reachable"] === true,
+    databaseExists: report["database_exists"] === true,
+    pgvectorAvailable: report["pgvector_available"] === true,
+    pgTrgmAvailable: report["pg_trgm_available"] === true,
+    schemaInitialized: report["schema_initialized"] === true,
+    schemaIdentityOk: report["schema_identity_ok"] !== false,
+    embeddingProviderReachable: report["embedding_provider_reachable"] === true,
+    embeddingModelAvailable: report["embedding_model_available"] === true,
+    embeddingDimensionCompatible:
+      typeof report["embedding_dimension_compatible"] === "boolean"
+        ? (report["embedding_dimension_compatible"] as boolean)
+        : null,
+  });
+  report["ok"] = readiness.ok;
+  report["readiness"] = { code: readiness.code, reasons: readiness.reasons };
+  if (readiness.ok) {
+    report["message"] =
+      `Remembering engine ${ENGINE_VERSION} is ready: schema ${schema} holds ` +
+      `${(report["chunk_count"] as number | null) ?? 0} chunks from ${(report["source_count"] as number | null) ?? 0} sources.`;
+  } else {
+    report["message"] = `${readiness.code}: ${readiness.reasons.join("; ")}`;
   }
 
   return report;

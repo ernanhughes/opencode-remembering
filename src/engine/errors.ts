@@ -46,11 +46,18 @@ export function classifyConnectionError(error: unknown): EngineError {
   );
 }
 
+/** Redact credentials from a DSN for display. The user and host stay visible. */
 export function redactDsn(value: string): string {
-  if (!value.includes("@")) return value;
-  const at = value.lastIndexOf("@");
-  const prefix = value.slice(0, at);
-  const suffix = value.slice(at + 1);
-  const scheme = prefix.includes("://") ? prefix.split("://", 1)[0] : "postgresql";
-  return `${scheme}://***:***@${suffix}`;
+  const schemeSplit = value.split("://");
+  if (schemeSplit.length < 2) return value;
+  const scheme = schemeSplit[0];
+  const rest = schemeSplit.slice(1).join("://");
+  const at = rest.lastIndexOf("@");
+  if (at === -1) return value;
+  const authority = rest.slice(0, at);
+  const suffix = rest.slice(at + 1);
+  const colon = authority.indexOf(":");
+  const user = colon === -1 ? authority : authority.slice(0, colon);
+  if (!user) return `${scheme}://***@${suffix}`;
+  return colon === -1 ? `${scheme}://${user}@${suffix}` : `${scheme}://${user}:***@${suffix}`;
 }

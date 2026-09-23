@@ -24,6 +24,8 @@ export {
 export type { RetrievalConfig, RetrievalMode, RetrievalTrace, RerankerKind, StoreRetrievalPort } from "./retrieval";
 export { NOT_INDEXED_MESSAGE, RememberingEngine } from "./pipeline";
 export type { EngineOptions, RefreshReport, SearchItem, SearchResult } from "./pipeline";
+export { computeBaselineReadiness, computeProductReadiness } from "./readiness";
+export type { Readiness, ReadinessCode } from "./readiness";
 export { resolveRoute, runPipelineStages } from "./context";
 export type { MemoryRoute as NativeRoute, PipelineCandidate, PipelineOptions, PipelineResult, RouteBlock as NativeRouteBlock, RouteRequest as NativeRouteRequest } from "./context";
 export * as Temporal from "./temporal/service";

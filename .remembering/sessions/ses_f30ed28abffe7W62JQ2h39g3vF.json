@@ -15470,6 +15470,1935 @@
       "tool_calls": [],
       "tool_results": [],
       "observed_at": "2026-09-23T16:59:54.053Z"
+    },
+    {
+      "id": "msg_0cf35a325001BwwLiaxkRd3Gjh",
+      "role": "assistant",
+      "text": "Agreed on all points — especially freezing the architecture and letting real use drive the next work.\n\nCurrent standing, for the record:\n\n- Native product, no legacy payload: 121 tests green, `tsc`/build/diff-check clean, packed install verified at 5 files.\n- Known compat residue: `python_dependencies: {}` on the health DTO, removable in a future API pass.\n- Suggested next proving ground: clean-machine install → `doctor` → `setup` → real repo use across all ten tools, watching refresh cost, injection bounds, and recovery from Postgres/Ollama outages.\n\nSay the word when you want to start the first-run hardening pass or the live-repo evaluation.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbb9564001SCQnreDnUXqrwC",
+      "role": "user",
+      "text": "Fix the native OpenCode Remembering health/readiness contract.\n\nRepository:\n\n`C:\\Projects\\opencode-remembering`\n\nCurrent repository:\nhttps://github.com/ernanhughes/opencode-remembering\n\n## Problem observed\n\nThe database was deliberately purged and recreated using the new native TypeScript/JavaScript runtime.\n\nThe self-check now reports:\n\n```text\n[PASS] Plugin directory exists\n[PASS] Package identity\n[PASS] OpenCode plugin ID\n[PASS] Native JS runtime guard\n[PASS] Native engine CLI present\n[PASS] Bun available\n[PASS] OpenCode available\n[PASS] Compiled plugin present\n[PASS] OpenCode configuration references plugin\n\nRunning native memory health check...\n\n[FAIL] Remembering native doctor\n       Exit code 1\n\n[FAIL] Engine reports healthy\n       ok=false\n\n[INFO] Project schema\n       remembering_b1d33534dd8e\n```\n\nThe earlier database/schema compatibility problem has already been removed by purging the old schema and running native setup.\n\nDo not reintroduce legacy Python compatibility or database migration work.\n\nThis task is specifically about the **native doctor/readiness contract**.\n\n---\n\n# Important suspected root cause\n\nInspect:\n\n```text\nsrc/engine/doctor.ts\n```\n\n`doctorBaseline()` currently initializes:\n\n```ts\nconst report = {\n  ok: false,\n  ...\n}\n```\n\nIt then successfully checks:\n\n* PostgreSQL connectivity\n* database existence\n* pgvector\n* pg_trgm\n* schema existence\n* project/schema identity\n* source/chunk counts\n* embedding version/dimension\n* FTS/HNSW indexes\n* Ollama reachability\n* embedding model availability\n* embedding dimensional compatibility\n\nBut at the end it simply:\n\n```ts\nreturn report;\n```\n\nThere appears to be **no point where `report.ok` is changed to `true`**.\n\nDo not merely replace `ok: false` with `ok: true`.\n\nImplement a real readiness calculation.\n\n---\n\n# Goal\n\nMake:\n\n```powershell\nbun src/native-cli.ts doctor --dir C:\\Projects\\opencode-remembering\n```\n\nreturn:\n\n```json\n{\n  \"ok\": true,\n  ...\n}\n```\n\nwhen the native Remembering runtime is genuinely ready.\n\nThe CLI should then exit with code `0`.\n\nThe existing double-click self-check should subsequently report:\n\n```text\nREMEMBERING READY\n```\n\nwithout special-case hacks.\n\n---\n\n# Required readiness semantics\n\nDerive `ok` from actual state.\n\nAt minimum, production readiness requires:\n\n```text\npostgres_reachable == true\ndatabase_exists == true\npgvector_available == true\npg_trgm_available == true\nschema_initialized == true\nschema_identity_ok == true\nembedding_provider_reachable == true\nembedding_model_available == true\nembedding_dimension_compatible != false\n```\n\nDo not silently treat a known dimension mismatch as healthy.\n\nAlso inspect whether the following should be required for the current frozen native runtime:\n\n```text\nFTS index\nHNSW index\ntemporal store\nstanding/trust store\ntrace store\nopen-loop store\nwrite store\ntrust policy validity\nwrite policy validity\n```\n\nUse the actual runtime contract rather than inventing requirements.\n\nThe resulting health contract must distinguish:\n\n```text\nHEALTHY\nNOT INITIALIZED\nBACKEND UNREACHABLE\nEXTENSION MISSING\nEMBEDDING UNAVAILABLE\nDIMENSION MISMATCH\nSCHEMA MISMATCH\nPOLICY INVALID\nSUBSYSTEM FAILURE\n```\n\nwhere those states are already meaningful in the implementation.\n\nDo not collapse all failures into `ok=false` with no explanation.\n\n---\n\n# `doctorBaseline()` behavior\n\nRefactor the end of `doctorBaseline()` so readiness is computed explicitly.\n\nFor example conceptually:\n\n```ts\nconst requiredChecks = [\n  report.postgres_reachable,\n  report.database_exists,\n  report.pgvector_available,\n  report.pg_trgm_available,\n  report.schema_initialized,\n  report.schema_identity_ok,\n  report.embedding_provider_reachable,\n  report.embedding_model_available,\n  report.embedding_dimension_compatible !== false,\n];\n\nreport.ok = requiredChecks.every(Boolean);\n```\n\nThat is illustrative only.\n\nUse proper typed logic and account for fields whose value can legitimately be `null`.\n\nDo not accidentally make:\n\n```text\nembedding_dimension_compatible == null\n```\n\nfail before a schema exists if the intended result is instead `NOT_INITIALIZED`.\n\n---\n\n# Native doctor\n\nThen inspect:\n\n```text\nsrc/engine/pipeline.ts\nRememberingEngine.nativeDoctor()\n```\n\nIt currently takes the baseline report and adds:\n\n```text\ntemporal\nframe\ntrust\nselection\ntrace\nloops\nwrites\n```\n\nMake sure the final `nativeDoctor()` result represents the readiness of the **whole native Remembering product**, not just Stage 1 retrieval.\n\nHowever:\n\nDo not change any Stage 1–9 semantics.\n\nDo not add new memory mechanisms.\n\nDo not alter:\n\n```text\nrouting\ntemporal reduction\nframing\ntrust decisions\nselection\ntrace semantics\nloop semantics\nwrite semantics\n```\n\nThis is health/readiness plumbing only.\n\n---\n\n# Health output\n\nMake the response diagnostically useful.\n\nA healthy response should contain something equivalent to:\n\n```json\n{\n  \"ok\": true,\n  \"native\": true,\n  \"engine_root\": \"typescript:src/engine\",\n  \"postgres_reachable\": true,\n  \"database_exists\": true,\n  \"pgvector_available\": true,\n  \"pg_trgm_available\": true,\n  \"schema_initialized\": true,\n  \"schema_identity_ok\": true,\n  \"embedding_provider_reachable\": true,\n  \"embedding_model_available\": true,\n  \"embedding_dimension_compatible\": true,\n  \"schema\": \"remembering_...\",\n  \"temporal\": {\n    \"store_ready\": true\n  },\n  \"trust\": {\n    \"standing_store_ready\": true,\n    \"policy_valid\": true\n  },\n  \"trace\": {\n    \"ready\": true\n  },\n  \"loops\": {\n    \"ready\": true\n  },\n  \"writes\": {\n    \"ready\": true,\n    \"policy\": {\n      \"valid\": true\n    }\n  }\n}\n```\n\nUse existing field names wherever possible.\n\nDo not break consumers unnecessarily.\n\n---\n\n# Provide an explicit reason when unhealthy\n\nAdd a bounded machine-readable readiness section if useful, for example:\n\n```json\n{\n  \"ok\": false,\n  \"readiness\": {\n    \"code\": \"NOT_INITIALIZED\",\n    \"reasons\": [\n      \"schema not initialized\"\n    ]\n  }\n}\n```\n\nor equivalent.\n\nPrefer stable codes over forcing callers to parse English.\n\nPossible codes should be derived from actual states, not arbitrary messages.\n\nThis is particularly important because the repository now has a self-check utility and Stage 10 will use health as a preflight.\n\n---\n\n# Fresh-database behavior\n\nA fresh PostgreSQL database before setup is **not an engine crash**.\n\nDoctor should return a controlled result such as:\n\n```text\nok=false\nNOT_INITIALIZED\n```\n\nrather than throwing because tables do not yet exist.\n\nAfter:\n\n```powershell\nbun src/native-cli.ts setup --dir <project>\n```\n\nthe same doctor call should return:\n\n```text\nok=true\n```\n\nassuming PostgreSQL, extensions and Ollama are healthy.\n\n---\n\n# CLI exit contract\n\nInspect:\n\n```text\nsrc/native-cli.ts\n```\n\nCurrent behavior sets exit code 1 when:\n\n```ts\nresult.ok === false\n```\n\nPreserve that useful contract:\n\n```text\nhealthy       → exit 0\nnot ready     → exit 1\nengine error  → exit 1\n```\n\nDo not make doctor always exit 0 just to satisfy the checker.\n\nThe health result itself must become correct.\n\n---\n\n# Required tests\n\nAdd regression tests for the bug.\n\nAt minimum:\n\n### 1. Healthy baseline\n\nConstruct a healthy doctor state and assert:\n\n```text\nok == true\n```\n\n### 2. Schema absent\n\nAssert:\n\n```text\nok == false\nreadiness indicates NOT_INITIALIZED\n```\n\nwithout an uncontrolled SQL exception.\n\n### 3. PostgreSQL unavailable\n\nPreserve the existing visible failure behavior.\n\n### 4. pgvector missing\n\nMust not report healthy.\n\n### 5. pg_trgm missing\n\nMust not report healthy.\n\n### 6. Ollama/model unavailable\n\nMust not report healthy.\n\n### 7. Dimension mismatch\n\nMust remain fail-closed.\n\n### 8. Schema identity mismatch\n\nMust remain fail-closed with `SCHEMA_MISMATCH`.\n\n### 9. Full native doctor\n\nAfter all native subsystem stores initialize successfully:\n\n```text\nnativeDoctor().ok == true\n```\n\n### 10. CLI exit code\n\nHealthy doctor:\n\n```text\nexit 0\n```\n\nUnhealthy doctor:\n\n```text\nexit 1\n```\n\n---\n\n# Live acceptance test\n\nUse the current local configuration and database.\n\nThe effective config currently targets:\n\n```text\nPostgreSQL:\nlocalhost:5432/memory_baseline\n\nEmbedding:\nollama\nbge-m3\nhttp://localhost:11434\n```\n\nThe project is:\n\n```text\nC:\\Projects\\opencode-remembering\n```\n\nRun:\n\n```powershell\nbun src/native-cli.ts setup --dir C:\\Projects\\opencode-remembering\nbun src/native-cli.ts refresh --dir C:\\Projects\\opencode-remembering\nbun src/native-cli.ts doctor --dir C:\\Projects\\opencode-remembering\n```\n\nThe final command must return:\n\n```text\nok: true\n```\n\nand exit `0`.\n\nThen run the existing self-check.\n\nExpected final result:\n\n```text\n============================================================\n REMEMBERING READY\n All checks passed.\n============================================================\n```\n\nor READY with only legitimate nonblocking warnings.\n\n---\n\n# Regression requirements\n\nRun:\n\n```powershell\nbun run check\nbun run build\n```\n\nRun the existing native engine tests.\n\nDo not weaken any existing test merely to make this pass.\n\nSpecifically preserve the no-Python-runtime guards.\n\nThe runtime must remain native TypeScript/JavaScript.\n\n---\n\n# Also clean up two minor issues while here\n\nThe self-check currently displayed the line:\n\n```text\nRunning native memory health check...\n```\n\ntwice in one earlier run.\n\nDetermine whether that duplication is still present. Fix it if it is in the script/runtime output, but do not spend significant effort if it was merely copied twice by the console.\n\nAlso improve doctor output so the effective database endpoint is visible **with credentials redacted**, e.g.:\n\n```text\npostgresql://postgres:***@localhost:5432/memory_baseline\n```\n\nNever print the password.\n\n---\n\n# Do not do these things\n\nDo NOT:\n\n* restore Python\n* restore the subprocess bridge\n* migrate the deleted legacy schema\n* alter Stage 1–9 behavior\n* hardcode `ok=true`\n* suppress real readiness failures\n* make the self-check ignore `ok=false`\n* drop/recreate databases automatically\n* print secrets\n* add Stage 10 behavior yet\n\n---\n\n# Definition of done\n\nThis task is complete when:\n\n```text\nfresh native setup\n        ↓\nrefresh\n        ↓\nnativeDoctor\n        ↓\nok=true\n        ↓\nCLI exit 0\n        ↓\ndouble-click self-check\n        ↓\nREMEMBERING READY\n```\n\nand the tests prove that unhealthy configurations still fail correctly.\n\nAt the end report:\n\n1. root cause,\n2. files changed,\n3. exact readiness rule,\n4. readiness/error codes added,\n5. tests added,\n6. live doctor result,\n7. self-check result,\n8. `bun run check` result,\n9. `bun run build` result,\n10. any remaining limitations.\n\nDo not proceed to Stage 10 in this task.\n",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbb95d2001Q2dvTs0t67ro4m",
+      "role": "assistant",
+      "text": "Health contract fix — inspecting the current doctor path and self-check first.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbbb597716aac1d4ae2e657a830",
+          "name": "read",
+          "input": {
+            "path": "C:\\Projects\\opencode-remembering/src/engine/doctor.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbbb597716aac1d4ae2e657a830"
+            }
+          }
+        },
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbbb6547429b339cb80d370bd2c",
+          "name": "shell",
+          "input": {
+            "command": "Get-ChildItem C:\\Projects\\opencode-remembering -Filter *.ps1; Get-ChildItem C:\\Projects\\opencode-remembering -Filter *.bat; Get-ChildItem C:\\Projects\\opencode-remembering -Filter *self-check*",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbbb6547429b339cb80d370bd2c"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:4da9a4a908d4ec66",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbbb597716aac1d4ae2e657a830",
+          "name": "read",
+          "result": {
+            "type": "text",
+            "value": "Read file C:\\Projects\\opencode-remembering/src/engine/doctor.ts, lines 1-145\n1: import { realpath } from \"node:fs/promises\";\n2: import * as path from \"node:path\";\n3: import type { Pool } from \"pg\";\n4: \n5: import { checkOllamaModel, buildEmbedder, type EmbeddingSpec } from \"./embeddings\";\n6: import { EngineError, redactDsn } from \"./errors\";\n7: import { extensionStatus, withClient } from \"./db\";\n8: import { ENGINE_VERSION, readProjectMeta } from \"./storage\";\n9: \n10: export type BaselineDoctorOptions = {\n11:   dsn: string;\n12:   schema: string;\n13:   projectDirectory: string;\n14:   embedding: EmbeddingSpec;\n15: };\n16: \n17: /** Canonical project identity: realpath + lowercase-on-Windows. */\n18: export async function canonicalProjectDir(directory: string): Promise<string> {\n19:   let resolved: string;\n20:   try {\n21:     resolved = await realpath(directory);\n22:   } catch {\n23:     resolved = path.resolve(directory);\n24:   }\n25:   return process.platform === \"win32\" ? resolved.toLowerCase() : resolved;\n26: }\n27: \n28: /**\n29:  * Stage 1 native doctor: baseline PostgreSQL + pgvector/pg_trgm +\n30:  * schema identity + embedding reachability. Temporal/frame/trust/\n31:  * trace/loops/write sections are returned as not-ready stubs until\n32:  * their TypeScript ports land (Stages 2+).\n33:  */\n34: export async function doctorBaseline(pool: Pool, options: BaselineDoctorOptions) {\n35:   const { dsn, schema, projectDirectory, embedding } = options;\n36:   const canonicalDir = await canonicalProjectDir(projectDirectory);\n37:   const redacted = redactDsn(dsn);\n38:   const report: Record<string, unknown> = {\n39:     ok: false,\n40:     engine_root: \"typescript:src/engine\",\n41:     engine_version: ENGINE_VERSION,\n42:     engine_available: true,\n43:     dsn_redacted: redacted,\n44:     schema,\n45:     project_directory: canonicalDir,\n46:     postgres_reachable: false,\n47:     database_exists: false,\n48:     pgvector_available: false,\n49:     pgvector_version: null,\n50:     pg_trgm_available: false,\n51:     schema_initialized: false,\n52:     schema_identity_ok: true,\n53:     embedding_provider_reachable: false,\n54:     embedding_model_available: false,\n55:     embedding_detail: \"\",\n56:     stored_embedding_version: null,\n57:     stored_embedding_dimension: null,\n58:     configured_embedding_version: `${embedding.provider}:${embedding.model}`,\n59:     embedding_dimension_compatible: null,\n60:     fts_index_present: false,\n61:     hnsw_index_present: false,\n62:     source_count: null,\n63:     chunk_count: null,\n64:     indexed: false,\n65:     chunks: null,\n66:   };\n67: \n68:   await withClient(pool, async (client) => {\n69:     report[\"postgres_reachable\"] = true;\n70:     report[\"database_exists\"] = true;\n71:     const vector = await extensionStatus(client, \"vector\");\n72:     const trgm = await extensionStatus(client, \"pg_trgm\");\n73:     report[\"pgvector_available\"] = vector.installed;\n74:     report[\"pgvector_version\"] = vector.version ?? \"unknown\";\n75:     report[\"pg_trgm_available\"] = trgm.installed;\n76:     const reg = await client.query(\"SELECT to_regclass($1)\", [`${schema}.chunks`]);\n77:     const initialized = reg.rows[0]?.to_regclass != null;\n78:     report[\"schema_initialized\"] = initialized;\n79:     report[\"indexed\"] = initialized;\n80:     if (!initialized) return;\n81:     const meta = await readProjectMeta(client, schema);\n82:     const recorded = meta[\"project.path\"];\n83:     if (recorded != null && recorded !== canonicalDir) {\n84:       report[\"schema_identity_ok\"] = false;\n85:       throw new EngineError(\n86:         \"SCHEMA_MISMATCH\",\n87:         `schema ${JSON.stringify(schema)} is claimed by project ${JSON.stringify(recorded)}, not ${JSON.stringify(canonicalDir)}. Refusing to read another project's memory.`,\n88:       );\n89:     }\n90:     const sources = await client.query(`SELECT count(*) FROM \"${schema}\".sources`);\n91:     const chunks = await client.query(`SELECT count(*) FROM \"${schema}\".chunks`);\n92:     report[\"source_count\"] = Number(sources.rows[0].count);\n93:     report[\"chunk_count\"] = Number(chunks.rows[0].count);\n94:     report[\"chunks\"] = report[\"chunk_count\"];\n95:     const versions = await client.query(\n96:       `SELECT embedding_version, count(*) FROM \"${schema}\".chunks GROUP BY 1 ORDER BY 2 DESC LIMIT 1`,\n97:     );\n98:     if (versions.rowCount) report[\"stored_embedding_version\"] = String(versions.rows[0].embedding_version);\n99:     const dim = await client.query(\n100:       \"SELECT atttypmod FROM pg_attribute JOIN pg_class ON pg_class.oid = pg_attribute.attrelid \" +\n101:         \"JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace \" +\n102:         \"WHERE pg_namespace.nspname = $1 AND pg_class.relname = 'chunks' AND pg_attribute.attname = 'embedding'\",\n103:       [schema],\n104:     );\n105:     if (dim.rowCount && dim.rows[0].atttypmod !== -1) {\n106:       report[\"stored_embedding_dimension\"] = Number(dim.rows[0].atttypmod);\n107:     }\n108:     const idx = await client.query(\"SELECT to_regclass($1) AS fts, to_regclass($2) AS hnsw\", [\n109:       `${schema}.chunks_tsv_idx`,\n110:       `${schema}.chunks_embedding_hnsw`,\n111:     ]);\n112:     report[\"fts_index_present\"] = idx.rows[0]?.fts != null;\n113:     report[\"hnsw_index_present\"] = idx.rows[0]?.hnsw != null;\n114:   });\n115: \n116:   // Embedding reachability (never downloads or substitutes models).\n117:   if (embedding.provider === \"ollama\") {\n118:     const check = await checkOllamaModel(embedding.host, embedding.model);\n119:     report[\"embedding_provider_reachable\"] = true;\n120:     report[\"embedding_model_available\"] = true;\n121:     report[\"embedding_detail\"] = check.detail;\n122:     if (typeof report[\"stored_embedding_dimension\"] === \"number\") {\n123:       const embedder = buildEmbedder(embedding);\n124:       const probe = await embedder.embed([\"dimension probe\"]);\n125:       report[\"embedding_dimension_compatible\"] = probe.dimension === report[\"stored_embedding_dimension\"];\n126:       if (!report[\"embedding_dimension_compatible\"]) {\n127:         throw new EngineError(\n128:           \"DIMENSION_MISMATCH\",\n129:           `store holds ${report[\"stored_embedding_dimension\"]}-dimensional vectors but ${embedding.provider}:${embedding.model} produces ${probe.dimension}. Re-embed with a fresh schema instead of mixing dimensions.`,\n130:         );\n131:       }\n132:     }\n133:   } else if (embedding.provider === \"hashing\") {\n134:     report[\"embedding_provider_reachable\"] = true;\n135:     report[\"embedding_model_available\"] = true;\n136:     report[\"embedding_detail\"] = \"hashing test double (REMEMBERING_ALLOW_TEST_EMBEDDINGS)\";\n137:   } else {\n138:     throw new EngineError(\n139:       \"CONFIG_INVALID\",\n140:       `embedding provider ${JSON.stringify(embedding.provider)} is not supported by the TypeScript engine; use \"ollama\".`,\n141:     );\n142:   }\n143: \n144:   return report;\n145: }"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbbb597716aac1d4ae2e657a830"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:2cba4de2000b6907",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbbb6547429b339cb80d370bd2c",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "\r\n    Directory: C:\\Projects\\opencode-remembering\r\n\r\n\u001b[32;1mMode   \u001b[0m\u001b[32;1m              LastWriteTime\u001b[0m\u001b[32;1m         Length\u001b[0m\u001b[32;1m Name\u001b[0m\r\n\u001b[32;1m----   \u001b[0m \u001b[32;1m             -------------\u001b[0m \u001b[32;1m        ------\u001b[0m \u001b[32;1m----\u001b[0m\r\n-a---           9/23/2026  8:03 PM           9763 \u001b[33;1mremembering-self-check.ps1\u001b[0m\r\n-a---           9/23/2026  8:00 PM            518 \u001b[32;1mremembering-self-check.cmd\u001b[0m\r\n-a---           9/23/2026  8:03 PM           9763 \u001b[33;1mremembering-self-check.ps1\u001b[0m\r\n\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbbb6547429b339cb80d370bd2c"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbbbc950015djbDsHgdQv7qL",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbbde2e77b999b9ef011b9de2ec",
+          "name": "read",
+          "input": {
+            "path": "C:\\Projects\\opencode-remembering/remembering-self-check.ps1"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbbde2e77b999b9ef011b9de2ec"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:63ff34dec058d47d",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbbde2e77b999b9ef011b9de2ec",
+          "name": "read",
+          "result": {
+            "type": "text",
+            "value": "Read file C:\\Projects\\opencode-remembering/remembering-self-check.ps1, lines 1-283\n1: param(\n2:     [string]$Project = \"\",\n3:     [switch]$Full\n4: )\n5: \n6: $ErrorActionPreference = \"Stop\"\n7: $PluginRoot = $PSScriptRoot\n8: \n9: if ([string]::IsNullOrWhiteSpace($Project)) {\n10:     $Project = $PluginRoot\n11: }\n12: \n13: $script:Failures = 0\n14: $script:Warnings = 0\n15: \n16: function Write-Result {\n17:     param(\n18:         [ValidateSet(\"PASS\",\"WARN\",\"FAIL\",\"INFO\")]\n19:         [string]$Status,\n20:         [string]$Name,\n21:         [string]$Detail = \"\"\n22:     )\n23: \n24:     switch ($Status) {\n25:         \"PASS\" { $prefix = \"[PASS]\"; $scriptColor = \"Green\" }\n26:         \"WARN\" { $prefix = \"[WARN]\"; $scriptColor = \"Yellow\"; $script:Warnings++ }\n27:         \"FAIL\" { $prefix = \"[FAIL]\"; $scriptColor = \"Red\"; $script:Failures++ }\n28:         default { $prefix = \"[INFO]\"; $scriptColor = \"Cyan\" }\n29:     }\n30: \n31:     Write-Host (\"{0,-7} {1}\" -f $prefix, $Name) -ForegroundColor $scriptColor\n32:     if (-not [string]::IsNullOrWhiteSpace($Detail)) {\n33:         Write-Host (\"         {0}\" -f $Detail) -ForegroundColor DarkGray\n34:     }\n35: }\n36: \n37: function Safe-Version {\n38:     param(\n39:         [System.Management.Automation.CommandInfo]$Command,\n40:         [string[]]$ArgumentList\n41:     )\n42:     try {\n43:         $output = @(& $Command.Source @ArgumentList 2>&1)\n44:         if ($LASTEXITCODE -eq 0 -and $output.Count -gt 0) {\n45:             return (($output | ForEach-Object { $_.ToString() }) -join \" \").Trim()\n46:         }\n47:     } catch {}\n48:     return $null\n49: }\n50: \n51: Clear-Host\n52: Write-Host \"\"\n53: Write-Host \"============================================================\" -ForegroundColor Cyan\n54: Write-Host \" OpenCode Remembering - Self Check\" -ForegroundColor Cyan\n55: Write-Host \"============================================================\" -ForegroundColor Cyan\n56: Write-Host \"Plugin:  $PluginRoot\"\n57: Write-Host \"Project: $Project\"\n58: Write-Host \"\"\n59: \n60: if (Test-Path -LiteralPath $PluginRoot) {\n61:     Write-Result PASS \"Plugin directory exists\" $PluginRoot\n62: } else {\n63:     Write-Result FAIL \"Plugin directory missing\" $PluginRoot\n64: }\n65: \n66: $packagePath = Join-Path $PluginRoot \"package.json\"\n67: $pluginSource = Join-Path $PluginRoot \"src\\plugin.ts\"\n68: $nativeCli = Join-Path $PluginRoot \"src\\native-cli.ts\"\n69: $distIndex = Join-Path $PluginRoot \"dist\\index.js\"\n70: \n71: if (Test-Path -LiteralPath $packagePath) {\n72:     try {\n73:         $pkg = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json\n74:         if ($pkg.name -eq \"opencode-remembering\") {\n75:             Write-Result PASS \"Package identity\" (\"{0} v{1}\" -f $pkg.name, $pkg.version)\n76:         } else {\n77:             Write-Result FAIL \"Package identity\" (\"Expected opencode-remembering, found: {0}\" -f $pkg.name)\n78:         }\n79:     } catch {\n80:         Write-Result FAIL \"package.json readable\" $_.Exception.Message\n81:     }\n82: } else {\n83:     Write-Result FAIL \"package.json present\" $packagePath\n84: }\n85: \n86: if (Test-Path -LiteralPath $pluginSource) {\n87:     $pluginText = Get-Content -LiteralPath $pluginSource -Raw\n88:     if ($pluginText -match 'id\\s*:\\s*[\"'']opencode-remembering[\"'']') {\n89:         Write-Result PASS \"OpenCode plugin ID\" \"opencode-remembering\"\n90:     } else {\n91:         Write-Result FAIL \"OpenCode plugin ID\" \"src\\plugin.ts does not declare id: opencode-remembering\"\n92:     }\n93: } else {\n94:     Write-Result FAIL \"Plugin source present\" $pluginSource\n95: }\n96: \n97: $noPythonGuard = Join-Path $PluginRoot \"src\\no-python-runtime.test.ts\"\n98: if (Test-Path -LiteralPath $noPythonGuard) {\n99:     Write-Result PASS \"Native JS runtime guard\" \"no-python-runtime.test.ts is present\"\n100: } else {\n101:     Write-Result WARN \"Native JS runtime guard\" \"no-python-runtime.test.ts was not found\"\n102: }\n103: \n104: if (Test-Path -LiteralPath $nativeCli) {\n105:     Write-Result PASS \"Native engine CLI present\" \"src\\native-cli.ts\"\n106: } else {\n107:     Write-Result FAIL \"Native engine CLI present\" $nativeCli\n108: }\n109: \n110: $bun = Get-Command bun -ErrorAction SilentlyContinue\n111: if ($bun) {\n112:     $bunVersion = Safe-Version $bun @(\"--version\")\n113:     if ($bunVersion) {\n114:         Write-Result PASS \"Bun available\" $bunVersion\n115:     } else {\n116:         Write-Result PASS \"Bun available\" $bun.Source\n117:     }\n118: } else {\n119:     Write-Result FAIL \"Bun available\" \"Install Bun or add it to PATH\"\n120: }\n121: \n122: $opencode = Get-Command opencode -ErrorAction SilentlyContinue\n123: if ($opencode) {\n124:     $ocVersion = Safe-Version $opencode @(\"--version\")\n125:     if ($ocVersion) {\n126:         Write-Result PASS \"OpenCode available\" $ocVersion\n127:     } else {\n128:         Write-Result PASS \"OpenCode available\" $opencode.Source\n129:     }\n130: } else {\n131:     Write-Result WARN \"OpenCode available\" \"opencode was not found on PATH\"\n132: }\n133: \n134: if (Test-Path -LiteralPath $distIndex) {\n135:     Write-Result PASS \"Compiled plugin present\" \"dist\\index.js\"\n136: } else {\n137:     Write-Result WARN \"Compiled plugin present\" \"dist\\index.js is missing; run: bun run build\"\n138: }\n139: \n140: $configCandidates = @(\n141:     (Join-Path $HOME \".config\\opencode\\opencode.json\"),\n142:     (Join-Path $HOME \".config\\opencode\\opencode.jsonc\"),\n143:     (Join-Path $HOME \".opencode\\opencode.json\"),\n144:     (Join-Path $HOME \".opencode\\opencode.jsonc\"),\n145:     (Join-Path $Project \"opencode.json\"),\n146:     (Join-Path $Project \"opencode.jsonc\")\n147: )\n148: \n149: if ($env:APPDATA) {\n150:     $configCandidates += (Join-Path $env:APPDATA \"opencode\\opencode.json\")\n151:     $configCandidates += (Join-Path $env:APPDATA \"opencode\\opencode.jsonc\")\n152: }\n153: \n154: $configCandidates = $configCandidates | Select-Object -Unique\n155: $foundConfig = $false\n156: $foundReference = $false\n157: $foundAt = @()\n158: \n159: foreach ($candidate in $configCandidates) {\n160:     if (-not (Test-Path -LiteralPath $candidate)) { continue }\n161: \n162:     $foundConfig = $true\n163:     try {\n164:         $text = Get-Content -LiteralPath $candidate -Raw\n165:         $normalizedRoot = $PluginRoot.Replace(\"\\\", \"/\")\n166:         if (\n167:             $text -match 'opencode-remembering' -or\n168:             $text.Contains($PluginRoot) -or\n169:             $text.Contains($normalizedRoot)\n170:         ) {\n171:             $foundReference = $true\n172:             $foundAt += $candidate\n173:         }\n174:     } catch {}\n175: }\n176: \n177: if ($foundReference) {\n178:     Write-Result PASS \"OpenCode configuration references plugin\" ($foundAt -join \"; \")\n179: } elseif ($foundConfig) {\n180:     Write-Result WARN \"OpenCode configuration references plugin\" \"Config found, but no obvious opencode-remembering reference was detected\"\n181: } else {\n182:     Write-Result WARN \"OpenCode configuration located\" \"No common OpenCode config file was found. The plugin may still be configured elsewhere.\"\n183: }\n184: \n185: if ($bun -and (Test-Path -LiteralPath $nativeCli)) {\n186:     Write-Host \"\"\n187:     Write-Host \"Running native memory health check...\" -ForegroundColor Cyan\n188: \n189:     Push-Location $PluginRoot\n190:     try {\n191:         $doctorLines = @(& $bun.Source \"src/native-cli.ts\" \"doctor\" \"--dir\" $Project 2>&1)\n192:         $doctorExit = $LASTEXITCODE\n193:         $doctorText = ($doctorLines | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine\n194: \n195:         if ($doctorExit -eq 0) {\n196:             Write-Result PASS \"Remembering native doctor\" \"PostgreSQL/config/embedding readiness check completed successfully\"\n197:         } else {\n198:             Write-Result FAIL \"Remembering native doctor\" (\"Exit code {0}\" -f $doctorExit)\n199:         }\n200: \n201:         try {\n202:             $doctor = $doctorText | ConvertFrom-Json\n203:             if ($null -ne $doctor.ok) {\n204:                 if ([bool]$doctor.ok) {\n205:                     Write-Result PASS \"Engine reports healthy\" \"ok=true\"\n206:                 } else {\n207:                     $message = if ($doctor.message) { [string]$doctor.message } else { \"ok=false\" }\n208:                     Write-Result FAIL \"Engine reports healthy\" $message\n209:                 }\n210:             }\n211: \n212:             if ($doctor.schema) {\n213:                 Write-Result INFO \"Project schema\" ([string]$doctor.schema)\n214:             }\n215: \n216:             if ($doctor.embedding) {\n217:                 $provider = $doctor.embedding.provider\n218:                 $model = $doctor.embedding.model\n219:                 if ($provider -or $model) {\n220:                     Write-Result INFO \"Embedding\" (\"{0} / {1}\" -f $provider, $model)\n221:                 }\n222:             }\n223: \n224:             if ($doctor.indexed -eq $false) {\n225:                 Write-Result WARN \"Memory index\" \"Project is not indexed yet. Run memory_setup or bun run setup.\"\n226:             }\n227:         } catch {\n228:             if ($doctorExit -ne 0) {\n229:                 $tail = ($doctorLines | Select-Object -Last 8) -join [Environment]::NewLine\n230:                 if ($tail) {\n231:                     Write-Host $tail -ForegroundColor DarkGray\n232:                 }\n233:             }\n234:         }\n235:     } catch {\n236:         Write-Result FAIL \"Remembering native doctor\" $_.Exception.Message\n237:     } finally {\n238:         Pop-Location\n239:     }\n240: }\n241: \n242: if ($Full -and $bun) {\n243:     Write-Host \"\"\n244:     Write-Host \"Running full plugin check...\" -ForegroundColor Cyan\n245:     Push-Location $PluginRoot\n246:     try {\n247:         & $bun.Source run check\n248:         if ($LASTEXITCODE -eq 0) {\n249:             Write-Result PASS \"Full plugin test/check suite\" \"bun run check\"\n250:         } else {\n251:             Write-Result FAIL \"Full plugin test/check suite\" (\"Exit code {0}\" -f $LASTEXITCODE)\n252:         }\n253:     } catch {\n254:         Write-Result FAIL \"Full plugin test/check suite\" $_.Exception.Message\n255:     } finally {\n256:         Pop-Location\n257:     }\n258: }\n259: \n260: Write-Host \"\"\n261: Write-Host \"============================================================\" -ForegroundColor Cyan\n262: \n263: if ($script:Failures -eq 0) {\n264:     Write-Host \" REMEMBERING READY\" -ForegroundColor Green\n265:     if ($script:Warnings -gt 0) {\n266:         Write-Host (\" {0} warning(s) - review above, but no hard failure.\" -f $script:Warnings) -ForegroundColor Yellow\n267:     } else {\n268:         Write-Host \" All checks passed.\" -ForegroundColor Green\n269:     }\n270:     $exitCode = 0\n271: } else {\n272:     Write-Host \" REMEMBERING NOT READY\" -ForegroundColor Red\n273:     Write-Host (\" {0} failure(s), {1} warning(s).\" -f $script:Failures, $script:Warnings) -ForegroundColor Red\n274:     $exitCode = 1\n275: }\n276: \n277: Write-Host \"============================================================\" -ForegroundColor Cyan\n278: Write-Host \"\"\n279: Write-Host \"Inside OpenCode, memory_health / memory_context / memory_trace\"\n280: Write-Host \"confirm that the live plugin tool surface has registered.\"\n281: Write-Host \"\"\n282: \n283: exit $exitCode"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbbde2e77b999b9ef011b9de2ec"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbbe251001MLLVm2p1Oaq1TZ",
+      "role": "assistant",
+      "text": "Root cause confirmed — `doctorBaseline()` never sets `ok: true`. Also verified the self-check prints \"Running native memory health check...\" only once (line 187), so that duplication was console copy. Building the fix.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbc6c3f73c8b0be581300958292",
+          "name": "write",
+          "input": {
+            "content": "/**\n * Machine-readable readiness contract for the native doctor.\n * Pure logic: no database, no network, no wall clock.\n */\n\nexport type ReadinessCode =\n  | \"HEALTHY\"\n  | \"NOT_INITIALIZED\"\n  | \"BACKEND_UNREACHABLE\"\n  | \"EXTENSION_MISSING\"\n  | \"EMBEDDING_UNAVAILABLE\"\n  | \"DIMENSION_MISMATCH\"\n  | \"SCHEMA_MISMATCH\"\n  | \"POLICY_INVALID\"\n  | \"SUBSYSTEM_FAILURE\";\n\nexport type Readiness = {\n  ok: boolean;\n  code: ReadinessCode;\n  reasons: string[];\n};\n\nexport type BaselineReadinessInput = {\n  postgresReachable: boolean;\n  databaseExists: boolean;\n  pgvectorAvailable: boolean;\n  pgTrgmAvailable: boolean;\n  schemaInitialized: boolean;\n  schemaIdentityOk: boolean;\n  embeddingProviderReachable: boolean;\n  embeddingModelAvailable: boolean;\n  /** Null when there is nothing stored to compare against (fresh schema). */\n  embeddingDimensionCompatible: boolean | null;\n};\n\n/**\n * Explicit readiness calculation. A null dimension verdict never fails:\n * NOT_INITIALIZED already covers the fresh-schema case, and an\n * initialized-but-empty store has nothing to conflict with.\n */\nexport function computeBaselineReadiness(input: BaselineReadinessInput): Readiness {\n  const reasons: string[] = [];\n  if (!input.postgresReachable) reasons.push(\"postgresql unreachable\");\n  if (!input.databaseExists) reasons.push(\"database does not exist\");\n  if (reasons.length > 0) {\n    return { ok: false, code: \"BACKEND_UNREACHABLE\", reasons };\n  }\n  if (!input.schemaIdentityOk) {\n    return {\n      ok: false,\n      code: \"SCHEMA_MISMATCH\",\n      reasons: [\"schema is claimed by a different project; refusing to mix projects\"],\n    };\n  }\n  if (!input.pgvectorAvailable) reasons.push(\"pgvector extension not enabled\");\n  if (!input.pgTrgmAvailable) reasons.push(\"pg_trgm extension not enabled\");\n  if (reasons.length > 0) {\n    return { ok: false, code: \"EXTENSION_MISSING\", reasons };\n  }\n  if (!input.schemaInitialized) {\n    return { ok: false, code: \"NOT_INITIALIZED\", reasons: [\"schema not initialized; run setup\"] };\n  }\n  if (!input.embeddingProviderReachable) reasons.push(\"embedding provider unreachable\");\n  if (!input.embeddingModelAvailable) reasons.push(\"embedding model unavailable\");\n  if (reasons.length > 0) {\n    return { ok: false, code: \"EMBEDDING_UNAVAILABLE\", reasons };\n  }\n  if (input.embeddingDimensionCompatible === false) {\n    return {\n      ok: false,\n      code: \"DIMENSION_MISMATCH\",\n      reasons: [\"stored vectors differ in dimension from the configured embedding model; re-embed with a fresh schema\"],\n    };\n  }\n  return { ok: true, code: \"HEALTHY\", reasons: [] };\n}\n\nexport type SubsystemReadinessInput = {\n  temporalReady: boolean;\n  standingReady: boolean;\n  trustPolicyValid: boolean;\n  trustPolicyError?: string | null;\n  traceReady: boolean;\n  loopsReady: boolean;\n  loopsError?: string;\n  writesReady: boolean;\n  writePolicyValid: boolean;\n  writePolicyError?: string | null;\n  frameError?: string | null;\n};\n\n/** Whole-product readiness: baseline gates everything, then policies, then stores. */\nexport function computeProductReadiness(\n  baseline: Readiness,\n  subsystems: SubsystemReadinessInput,\n): Readiness {\n  if (!baseline.ok) return baseline;\n  const policyReasons: string[] = [];\n  if (!subsystems.trustPolicyValid) {\n    policyReasons.push(`trust policy invalid: ${(subsystems.trustPolicyError ?? \"see trust section\").slice(0, 160)}`);\n  }\n  if (!subsystems.writePolicyValid) {\n    policyReasons.push(`write policy invalid: ${(subsystems.writePolicyError ?? \"see writes section\").slice(0, 160)}`);\n  }\n  if (subsystems.frameError) {\n    policyReasons.push(`project frame invalid: ${subsystems.frameError.slice(0, 160)}`);\n  }\n  if (policyReasons.length > 0) {\n    return { ok: false, code: \"POLICY_INVALID\", reasons: policyReasons };\n  }\n  const storeReasons: string[] = [];\n  if (!subsystems.temporalReady) storeReasons.push(\"temporal store not ready\");\n  if (!subsystems.standingReady) storeReasons.push(\"standing store not ready\");\n  if (!subsystems.traceReady) storeReasons.push(\"trace store not ready\");\n  if (!subsystems.loopsReady) {\n    storeReasons.push(\n      subsystems.loopsError ? `open-loop projection failed: ${subsystems.loopsError.slice(0, 160)}` : \"open-loop store not ready\",\n    );\n  }\n  if (!subsystems.writesReady) storeReasons.push(\"write store not ready\");\n  if (storeReasons.length > 0) {\n    return { ok: false, code: \"SUBSYSTEM_FAILURE\", reasons: storeReasons };\n  }\n  return { ok: true, code: \"HEALTHY\", reasons: [] };\n}\n",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/readiness.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbc6c3f73c8b0be581300958292"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:6bfce2481e9cb118",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbc6c3f73c8b0be581300958292",
+          "name": "write",
+          "result": {
+            "type": "text",
+            "value": "Created file successfully: src/engine/readiness.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbc6c3f73c8b0be581300958292"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbc8b6c001MzP3GaSRqlUksP",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbc8f9674d0a476d9765684a48e",
+          "name": "edit",
+          "input": {
+            "newString": "import { checkOllamaModel, buildEmbedder, type EmbeddingSpec } from \"./embeddings\";\nimport { EngineError, redactDsn } from \"./errors\";\nimport { extensionStatus, withClient } from \"./db\";\nimport { computeBaselineReadiness } from \"./readiness\";\nimport { ENGINE_VERSION, readProjectMeta } from \"./storage\";",
+            "oldString": "import { checkOllamaModel, buildEmbedder, type EmbeddingSpec } from \"./embeddings\";\nimport { EngineError, redactDsn } from \"./errors\";\nimport { extensionStatus, withClient } from \"./db\";\nimport { ENGINE_VERSION, readProjectMeta } from \"./storage\";",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/doctor.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbc8f9674d0a476d9765684a48e"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:4bdcae3cf9f37485",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbc8f9674d0a476d9765684a48e",
+          "name": "edit",
+          "result": {
+            "type": "text",
+            "value": "Edited src/engine/doctor.ts (1 replacement)"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbc8f9674d0a476d9765684a48e"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbc9901001KBRo5WqUhKGUSH",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbc9e737746a829f67c452676f4",
+          "name": "edit",
+          "input": {
+            "newString": "  } else {\n    throw new EngineError(\n      \"CONFIG_INVALID\",\n      `embedding provider ${JSON.stringify(embedding.provider)} is not supported by the TypeScript engine; use \"ollama\".`,\n    );\n  }\n\n  // Explicit readiness calculation: every field above was probed, so derive\n  // ok from actual state instead of leaving the initial false in place.\n  const readiness = computeBaselineReadiness({\n    postgresReachable: report[\"postgres_reachable\"] === true,\n    databaseExists: report[\"database_exists\"] === true,\n    pgvectorAvailable: report[\"pgvector_available\"] === true,\n    pgTrgmAvailable: report[\"pg_trgm_available\"] === true,\n    schemaInitialized: report[\"schema_initialized\"] === true,\n    schemaIdentityOk: report[\"schema_identity_ok\"] !== false,\n    embeddingProviderReachable: report[\"embedding_provider_reachable\"] === true,\n    embeddingModelAvailable: report[\"embedding_model_available\"] === true,\n    embeddingDimensionCompatible:\n      typeof report[\"embedding_dimension_compatible\"] === \"boolean\"\n        ? (report[\"embedding_dimension_compatible\"] as boolean)\n        : null,\n  });\n  report[\"ok\"] = readiness.ok;\n  report[\"readiness\"] = { code: readiness.code, reasons: readiness.reasons };\n  if (readiness.ok) {\n    report[\"message\"] =\n      `Remembering engine ${ENGINE_VERSION} is ready: schema ${schema} holds ` +\n      `${(report[\"chunk_count\"] as number | null) ?? 0} chunks from ${(report[\"source_count\"] as number | null) ?? 0} sources.`;\n  } else {\n    report[\"message\"] = `${readiness.code}: ${readiness.reasons.join(\"; \")}`;\n  }\n\n  return report;\n}",
+            "oldString": "  } else {\n    throw new EngineError(\n      \"CONFIG_INVALID\",\n      `embedding provider ${JSON.stringify(embedding.provider)} is not supported by the TypeScript engine; use \"ollama\".`,\n    );\n  }\n\n  return report;\n}",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/doctor.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbc9e737746a829f67c452676f4"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:4774b5bdefa3720c",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbc9e737746a829f67c452676f4",
+          "name": "edit",
+          "result": {
+            "type": "text",
+            "value": "Edited src/engine/doctor.ts (1 replacement)"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbc9e737746a829f67c452676f4"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbcab97001i0APEfk7pE4uZn",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbcb8c773118b3cf39750298f9c",
+          "name": "edit",
+          "input": {
+            "newString": "    const countBy = (state: string) => loopViews.filter((v) => v.state === state).length;\n    const result: Record<string, unknown> = {\n      ...baseline,\n      native: true,",
+            "oldString": "    const countBy = (state: string) => loopViews.filter((v) => v.state === state).length;\n    return {\n      ...baseline,\n      native: true,",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/pipeline.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbcb8c773118b3cf39750298f9c"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:5974a290ebd78f28",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbcb8c773118b3cf39750298f9c",
+          "name": "edit",
+          "result": {
+            "type": "text",
+            "value": "Edited src/engine/pipeline.ts (1 replacement)"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbcb8c773118b3cf39750298f9c"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbcc0c5001Qqg8Vul80TJRKu",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbcc47d752eb75d8010ec9a06dd",
+          "name": "edit",
+          "input": {
+            "newString": "        unresolved_index_records: [],\n        last_action_at: writeCounts.lastActionAt,\n      },\n    };\n    // Whole-product readiness: baseline gates everything, then policies,\n    // then subsystem stores. No memory semantics change here.\n    const { computeProductReadiness } = await import(\"./readiness\");\n    const baselineReadiness = (baseline[\"readiness\"] as { code: string; reasons: string[] } | undefined) ??\n      (baseline[\"ok\"] === true\n        ? { code: \"HEALTHY\", reasons: [] }\n        : { code: \"SUBSYSTEM_FAILURE\", reasons: [\"baseline not ready\"] });\n    const product = computeProductReadiness(\n      {\n        ok: baseline[\"ok\"] === true,\n        code: baselineReadiness.code as import(\"./readiness\").ReadinessCode,\n        reasons: baselineReadiness.reasons,\n      },\n      {\n        temporalReady: (temporalHealth as { storeReady?: boolean }).storeReady === true,\n        standingReady: true,\n        trustPolicyValid: trustValid,\n        trustPolicyError: trustError,\n        traceReady: true,\n        loopsReady: loopError === undefined,\n        loopsError: loopError,\n        writesReady: true,\n        writePolicyValid: writeValid,\n        writePolicyError: writePolicyError,\n        frameError: frame.frameError,\n      },\n    );\n    result[\"ok\"] = product.ok;\n    result[\"readiness\"] = { code: product.code, reasons: product.reasons };\n    if (product.ok) {\n      result[\"message\"] = baseline[\"message\"] ?? \"native Remembering engine is ready.\";\n    } else if (product.code !== ((baseline[\"readiness\"] as { code?: string } | undefined)?.code ?? \"\")) {\n      result[\"message\"] = `${product.code}: ${product.reasons.join(\"; \")}`;\n    }\n    return result;\n  }",
+            "oldString": "        unresolved_index_records: [],\n        last_action_at: writeCounts.lastActionAt,\n      },\n    };\n  }",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/pipeline.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbcc47d752eb75d8010ec9a06dd"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:0154e217636e3533",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbcc47d752eb75d8010ec9a06dd",
+          "name": "edit",
+          "result": {
+            "type": "text",
+            "value": "Edited src/engine/pipeline.ts (1 replacement)"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbcc47d752eb75d8010ec9a06dd"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbcd433001M53Nml47UwQPxZ",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbce025715eab2cfa86acc8c94e",
+          "name": "edit",
+          "input": {
+            "newString": "    case \"doctor\":\n      result = await engine.nativeDoctor();\n      break;",
+            "oldString": "    case \"doctor\":\n      result = await engine.doctor();\n      break;",
+            "path": "C:\\Projects\\opencode-remembering/src/native-cli.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbce025715eab2cfa86acc8c94e"
+            }
+          }
+        },
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbce246707380b977970ddbaebb",
+          "name": "read",
+          "input": {
+            "limit": 15,
+            "offset": 44,
+            "path": "C:\\Projects\\opencode-remembering/src/engine/errors.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbce246707380b977970ddbaebb"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:e1fa30ccb25280fb",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbce025715eab2cfa86acc8c94e",
+          "name": "edit",
+          "result": {
+            "type": "error",
+            "value": {
+              "error": {
+                "type": "tool.execution",
+                "message": "Could not find oldString in C:\\Projects\\opencode-remembering/src/native-cli.ts. It must match exactly, including whitespace and indentation."
+              },
+              "content": []
+            }
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbce025715eab2cfa86acc8c94e"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:0dcd3cff66abcedc",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbce246707380b977970ddbaebb",
+          "name": "read",
+          "result": {
+            "type": "text",
+            "value": "Read file C:\\Projects\\opencode-remembering/src/engine/errors.ts, lines 44-56\n44:     \"DB_UNREACHABLE\",\n45:     `cannot reach PostgreSQL: ${error instanceof Error ? error.name : \"Error\"}: ${message.slice(0, 200)}`,\n46:   );\n47: }\n48: \n49: export function redactDsn(value: string): string {\n50:   if (!value.includes(\"@\")) return value;\n51:   const at = value.lastIndexOf(\"@\");\n52:   const prefix = value.slice(0, at);\n53:   const suffix = value.slice(at + 1);\n54:   const scheme = prefix.includes(\"://\") ? prefix.split(\"://\", 1)[0] : \"postgresql\";\n55:   return `${scheme}://***:***@${suffix}`;\n56: }"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbce246707380b977970ddbaebb"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbce73f001CvKbEB8QCQZZgp",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbceaeb778d8c5e15ef269e9c9f",
+          "name": "grep",
+          "input": {
+            "limit": 10,
+            "path": "C:\\Projects\\opencode-remembering/src/native-cli.ts",
+            "pattern": "doctor"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbceaeb778d8c5e15ef269e9c9f"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:5b957f81a18f8a2f",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbceaeb778d8c5e15ef269e9c9f",
+          "name": "grep",
+          "result": {
+            "type": "text",
+            "value": "Found 3 matches\nC:\\Projects\\opencode-remembering\\src\\native-cli.ts:\n  Line 12:  * Commands: doctor setup refresh search context state temporal-import\n\n  Line 23:     \"usage: native-cli.ts <doctor|setup|refresh|search|context|state|temporal-import|frame-health|trust-health|trace|loop-health|loop-list|loop-show|loop-history|remember|write-health|write-history|write-rebuild|record-show> [args] [--dir <path>] ...\",\n\n  Line 88:     case \"doctor\":\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbceaeb778d8c5e15ef269e9c9f"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbcef9d001veWXVZeRKsHkPx",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbcf4587286b33b9bb58f4f1e94",
+          "name": "read",
+          "input": {
+            "limit": 14,
+            "offset": 84,
+            "path": "C:\\Projects\\opencode-remembering/src/native-cli.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbcf4587286b33b9bb58f4f1e94"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:3195a51fd19df7f2",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbcf4587286b33b9bb58f4f1e94",
+          "name": "read",
+          "result": {
+            "type": "text",
+            "value": "Read file C:\\Projects\\opencode-remembering/src/native-cli.ts, lines 84-97\n84: \n85: let result: unknown;\n86: try {\n87:   switch (command) {\n88:     case \"doctor\":\n89:       result = await engine.nativeDoctor();\n90:       break;\n91:     case \"setup\":\n92:       result = await engine.setup();\n93:       break;\n94:     case \"refresh\":\n95:       result = await engine.refresh();\n96:       break;\n97:     case \"search\":\n[Output truncated. Continue reading with offset: 98]"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbcf4587286b33b9bb58f4f1e94"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbcfacc001Nq3V10vKf1sh3K",
+      "role": "assistant",
+      "text": "CLI already uses `nativeDoctor` — good. Now the redacted-endpoint improvement.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbd02ce725cab00a14f742ff92b",
+          "name": "edit",
+          "input": {
+            "newString": "/** Redact credentials from a DSN for display. The user and host stay visible. */\nexport function redactDsn(value: string): string {\n  const schemeSplit = value.split(\"://\");\n  if (schemeSplit.length < 2) return value;\n  const scheme = schemeSplit[0];\n  const rest = schemeSplit.slice(1).join(\"://\");\n  const at = rest.lastIndexOf(\"@\");\n  if (at === -1) return value;\n  const authority = rest.slice(0, at);\n  const suffix = rest.slice(at + 1);\n  const colon = authority.indexOf(\":\");\n  const user = colon === -1 ? authority : authority.slice(0, colon);\n  if (!user) return `${scheme}://***@${suffix}`;\n  return colon === -1 ? `${scheme}://${user}@${suffix}` : `${scheme}://${user}:***@${suffix}`;\n}",
+            "oldString": "export function redactDsn(value: string): string {\n  if (!value.includes(\"@\")) return value;\n  const at = value.lastIndexOf(\"@\");\n  const prefix = value.slice(0, at);\n  const suffix = value.slice(at + 1);\n  const scheme = prefix.includes(\"://\") ? prefix.split(\"://\", 1)[0] : \"postgresql\";\n  return `${scheme}://***:***@${suffix}`;\n}",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/errors.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd02ce725cab00a14f742ff92b"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:343dbfe548166215",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbd02ce725cab00a14f742ff92b",
+          "name": "edit",
+          "result": {
+            "type": "text",
+            "value": "Edited src/engine/errors.ts (1 replacement)"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd02ce725cab00a14f742ff92b"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbd106d001aQ9mXNmJiPheWy",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbd17aa74c9bec6a0a4a6e3b51c",
+          "name": "edit",
+          "input": {
+            "newString": "            if ($doctor.schema) {\n                Write-Result INFO \"Project schema\" ([string]$doctor.schema)\n            }\n\n            if ($doctor.dsn_redacted) {\n                Write-Result INFO \"Database endpoint\" ([string]$doctor.dsn_redacted)\n            }\n\n            if ($doctor.readiness -and $doctor.readiness.code) {\n                Write-Result INFO \"Readiness\" ([string]$doctor.readiness.code)\n            }",
+            "oldString": "            if ($doctor.schema) {\n                Write-Result INFO \"Project schema\" ([string]$doctor.schema)\n            }",
+            "path": "C:\\Projects\\opencode-remembering/remembering-self-check.ps1"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd17aa74c9bec6a0a4a6e3b51c"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:d553b8a4b19de63b",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbd17aa74c9bec6a0a4a6e3b51c",
+          "name": "edit",
+          "result": {
+            "type": "text",
+            "value": "Edited remembering-self-check.ps1 (1 replacement)"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd17aa74c9bec6a0a4a6e3b51c"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbd1f95001kgf1p6LGan3xcZ",
+      "role": "assistant",
+      "text": "Now the regression tests.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbd408675968f23540f7fa04918",
+          "name": "write",
+          "input": {
+            "content": "import { describe, expect, test } from \"bun:test\";\nimport { mkdtemp, rm, writeFile } from \"node:fs/promises\";\nimport { tmpdir } from \"node:os\";\nimport * as path from \"node:path\";\n\nimport { redactDsn } from \"./errors\";\nimport { computeBaselineReadiness, computeProductReadiness } from \"./readiness\";\n\nconst INTEGRATION = process.env.REMEMBERING_INTEGRATION_TESTS === \"1\";\nconst DSN = process.env.MEMORY_BASELINE_DSN ?? \"postgresql://postgres:postgres@localhost:5432/memory_baseline\";\n\nfunction healthyBaseline() {\n  return {\n    postgresReachable: true,\n    databaseExists: true,\n    pgvectorAvailable: true,\n    pgTrgmAvailable: true,\n    schemaInitialized: true,\n    schemaIdentityOk: true,\n    embeddingProviderReachable: true,\n    embeddingModelAvailable: true,\n    embeddingDimensionCompatible: true as boolean | null,\n  };\n}\n\ndescribe(\"baseline readiness calculation\", () => {\n  test(\"healthy baseline reports ok=true\", () => {\n    const readiness = computeBaselineReadiness(healthyBaseline());\n    expect(readiness.ok).toBe(true);\n    expect(readiness.code).toBe(\"HEALTHY\");\n    expect(readiness.reasons).toEqual([]);\n  });\n\n  test(\"absent schema is NOT_INITIALIZED, not a crash\", () => {\n    const readiness = computeBaselineReadiness({ ...healthyBaseline(), schemaInitialized: false });\n    expect(readiness.ok).toBe(false);\n    expect(readiness.code).toBe(\"NOT_INITIALIZED\");\n  });\n\n  test(\"null dimension verdict does not fail a fresh schema\", () => {\n    const readiness = computeBaselineReadiness({\n      ...healthyBaseline(),\n      schemaInitialized: false,\n      embeddingDimensionCompatible: null,\n    });\n    expect(readiness.code).toBe(\"NOT_INITIALIZED\");\n  });\n\n  test(\"null dimension verdict does not fail an empty initialized store\", () => {\n    const readiness = computeBaselineReadiness({ ...healthyBaseline(), embeddingDimensionCompatible: null });\n    expect(readiness.ok).toBe(true);\n  });\n\n  test(\"unreachable postgres is BACKEND_UNREACHABLE\", () => {\n    const readiness = computeBaselineReadiness({ ...healthyBaseline(), postgresReachable: false, databaseExists: false });\n    expect(readiness.ok).toBe(false);\n    expect(readiness.code).toBe(\"BACKEND_UNREACHABLE\");\n  });\n\n  test(\"missing pgvector or pg_trgm is EXTENSION_MISSING\", () => {\n    expect(computeBaselineReadiness({ ...healthyBaseline(), pgvectorAvailable: false }).code).toBe(\"EXTENSION_MISSING\");\n    expect(computeBaselineReadiness({ ...healthyBaseline(), pgTrgmAvailable: false }).code).toBe(\"EXTENSION_MISSING\");\n  });\n\n  test(\"unreachable embedding is EMBEDDING_UNAVAILABLE\", () => {\n    const readiness = computeBaselineReadiness({ ...healthyBaseline(), embeddingProviderReachable: false, embeddingModelAvailable: false });\n    expect(readiness.ok).toBe(false);\n    expect(readiness.code).toBe(\"EMBEDDING_UNAVAILABLE\");\n  });\n\n  test(\"dimension mismatch stays fail-closed\", () => {\n    const readiness = computeBaselineReadiness({ ...healthyBaseline(), embeddingDimensionCompatible: false });\n    expect(readiness.ok).toBe(false);\n    expect(readiness.code).toBe(\"DIMENSION_MISMATCH\");\n  });\n\n  test(\"schema identity mismatch stays fail-closed\", () => {\n    const readiness = computeBaselineReadiness({ ...healthyBaseline(), schemaIdentityOk: false });\n    expect(readiness.ok).toBe(false);\n    expect(readiness.code).toBe(\"SCHEMA_MISMATCH\");\n  });\n});\n\ndescribe(\"product readiness calculation\", () => {\n  const subsystems = {\n    temporalReady: true,\n    standingReady: true,\n    trustPolicyValid: true,\n    traceReady: true,\n    loopsReady: true,\n    writesReady: true,\n    writePolicyValid: true,\n  };\n  test(\"healthy baseline plus ready subsystems is healthy\", () => {\n    const readiness = computeProductReadiness({ ok: true, code: \"HEALTHY\", reasons: [] }, subsystems);\n    expect(readiness).toEqual({ ok: true, code: \"HEALTHY\", reasons: [] });\n  });\n\n  test(\"baseline failure propagates unchanged\", () => {\n    const baseline = computeBaselineReadiness({ ...healthyBaseline(), schemaInitialized: false });\n    expect(computeProductReadiness(baseline, subsystems)).toEqual(baseline);\n  });\n\n  test(\"invalid trust or write policy is POLICY_INVALID\", () => {\n    expect(\n      computeProductReadiness({ ok: true, code: \"HEALTHY\", reasons: [] }, { ...subsystems, trustPolicyValid: false, trustPolicyError: \"bad json\" }).code,\n    ).toBe(\"POLICY_INVALID\");\n    expect(\n      computeProductReadiness({ ok: true, code: \"HEALTHY\", reasons: [] }, { ...subsystems, writePolicyValid: false }).code,\n    ).toBe(\"POLICY_INVALID\");\n  });\n\n  test(\"unready stores are SUBSYSTEM_FAILURE\", () => {\n    const readiness = computeProductReadiness(\n      { ok: true, code: \"HEALTHY\", reasons: [] },\n      { ...subsystems, traceReady: false },\n    );\n    expect(readiness.ok).toBe(false);\n    expect(readiness.code).toBe(\"SUBSYSTEM_FAILURE\");\n  });\n});\n\ndescribe(\"dsn redaction\", () => {\n  test(\"password redacted, user and endpoint visible\", () => {\n    expect(redactDsn(\"postgresql://postgres:s3cret@localhost:5432/memory_baseline\")).toBe(\n      \"postgresql://postgres:***@localhost:5432/memory_baseline\",\n    );\n  });\n\n  test(\"no credentials left intact\", () => {\n    expect(redactDsn(\"postgresql://localhost:5432/memory_baseline\")).toBe(\n      \"postgresql://localhost:5432/memory_baseline\",\n    );\n  });\n});\n\ndescribe(\"live doctor integration\", () => {\n  test.skipIf(!INTEGRATION)(\"absent schema returns NOT_INITIALIZED without throwing\", async () => {\n    const { connectPool, withClient } = await import(\"./db\");\n    const { doctorBaseline } = await import(\"./doctor\");\n    const pool = await connectPool(DSN);\n    try {\n      const schema = `remembering_doctor_test_${Date.now().toString(36)}`;\n      const report = await doctorBaseline(pool, {\n        dsn: DSN,\n        schema,\n        projectDirectory: tmpdir(),\n        embedding: { provider: \"hashing\", model: \"hashing-64\", host: \"\", dimension: 64 },\n      });\n      expect(report[\"ok\"]).toBe(false);\n      expect((report[\"readiness\"] as { code: string }).code).toBe(\"NOT_INITIALIZED\");\n      await withClient(pool, async (client) => {\n        await client.query(`DROP SCHEMA IF EXISTS \"${schema}\" CASCADE`);\n      });\n    } finally {\n      await pool.end();\n    }\n  });\n\n  test.skipIf(!INTEGRATION)(\"unreachable postgres preserves the coded failure\", async () => {\n    const { connectPool } = await import(\"./db\");\n    await expect(connectPool(\"postgresql://postgres:postgres@localhost:55999/nope\")).rejects.toThrow(/DB_UNREACHABLE/);\n  });\n\n  test.skipIf(!INTEGRATION)(\"fresh native setup reports whole-product healthy\", async () => {\n    process.env.REMEMBERING_ALLOW_TEST_EMBEDDINGS = \"1\";\n    const { RememberingEngine } = await import(\"./pipeline\");\n    const dir = await mkdtemp(path.join(tmpdir(), \"remembering-doctor-\"));\n    try {\n      await writeFile(path.join(dir, \"notes.md\"), \"# Notes\\nThe auth design uses OAuth2.\\n\");\n      const engine = new RememberingEngine({\n        dsn: DSN,\n        schema: `remembering_doctor_e2e_${Date.now().toString(36)}`,\n        projectDirectory: dir,\n        embedding: { provider: \"hashing\", model: \"hashing-64\", host: \"\", dimension: 64 },\n        retrieval: { mode: \"hybrid\", lexicalK: 5, denseK: 5, fusionK: 60, rerankK: 5, reranker: \"none\" },\n      });\n      try {\n        await engine.setup();\n        const report = await engine.nativeDoctor();\n        expect(report[\"ok\"]).toBe(true);\n        expect((report[\"readiness\"] as { code: string }).code).toBe(\"HEALTHY\");\n      } finally {\n        await engine.close();\n      }\n    } finally {\n      await rm(dir, { recursive: true, force: true });\n    }\n  }, 120_000);\n});\n",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/doctor.test.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd408675968f23540f7fa04918"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:07e27404dc02219d",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbd408675968f23540f7fa04918",
+          "name": "write",
+          "result": {
+            "type": "text",
+            "value": "Created file successfully: src/engine/doctor.test.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd408675968f23540f7fa04918"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbd6277001cm8Xnhpv3Hkejz",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbd69047245a2e856393a31be2f",
+          "name": "edit",
+          "input": {
+            "newString": "export { RememberingEngine } from \"./pipeline\";\nexport type { EngineOptions, RefreshReport, SearchItem, SearchResult } from \"./pipeline\";\nexport { computeBaselineReadiness, computeProductReadiness } from \"./readiness\";\nexport type { Readiness, ReadinessCode } from \"./readiness\";",
+            "oldString": "export { RememberingEngine } from \"./pipeline\";\nexport type { EngineOptions, RefreshReport, SearchItem, SearchResult } from \"./pipeline\";",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/index.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd69047245a2e856393a31be2f"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:67f2375c6def83c1",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbd69047245a2e856393a31be2f",
+          "name": "edit",
+          "result": {
+            "type": "error",
+            "value": {
+              "error": {
+                "type": "tool.execution",
+                "message": "Could not find oldString in C:\\Projects\\opencode-remembering/src/engine/index.ts. It must match exactly, including whitespace and indentation."
+              },
+              "content": []
+            }
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd69047245a2e856393a31be2f"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbd6ea2001ubygUW4lTrTJOp",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbd726570d0986b293add1dba2e",
+          "name": "grep",
+          "input": {
+            "limit": 10,
+            "path": "C:\\Projects\\opencode-remembering/src/engine/index.ts",
+            "pattern": "pipeline"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd726570d0986b293add1dba2e"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:a1bb7228fab8aa9f",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbd726570d0986b293add1dba2e",
+          "name": "grep",
+          "result": {
+            "type": "text",
+            "value": "Found 2 matches\nC:\\Projects\\opencode-remembering\\src\\engine\\index.ts:\n  Line 25: export { NOT_INDEXED_MESSAGE, RememberingEngine } from \"./pipeline\";\n\n  Line 26: export type { EngineOptions, RefreshReport, SearchItem, SearchResult } from \"./pipeline\";\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd726570d0986b293add1dba2e"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbd7a38001t6hTwXAqvcP6Sf",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbd7e957772a307aa7a0446873a",
+          "name": "edit",
+          "input": {
+            "newString": "export { NOT_INDEXED_MESSAGE, RememberingEngine } from \"./pipeline\";\nexport type { EngineOptions, RefreshReport, SearchItem, SearchResult } from \"./pipeline\";\nexport { computeBaselineReadiness, computeProductReadiness } from \"./readiness\";\nexport type { Readiness, ReadinessCode } from \"./readiness\";",
+            "oldString": "export { NOT_INDEXED_MESSAGE, RememberingEngine } from \"./pipeline\";\nexport type { EngineOptions, RefreshReport, SearchItem, SearchResult } from \"./pipeline\";",
+            "path": "C:\\Projects\\opencode-remembering/src/engine/index.ts"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd7e957772a307aa7a0446873a"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:77a003bdf3975f94",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbd7e957772a307aa7a0446873a",
+          "name": "edit",
+          "result": {
+            "type": "text",
+            "value": "Edited src/engine/index.ts (1 replacement)"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd7e957772a307aa7a0446873a"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbd864800167xRxyRI32cmm5",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbd8b1a7142bb77a8f7b965bf30",
+          "name": "shell",
+          "input": {
+            "command": "bun run typecheck; bun test src/engine/doctor.test.ts",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd8b1a7142bb77a8f7b965bf30"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:ea1e06f44333248e",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbd8b1a7142bb77a8f7b965bf30",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "$ tsc --noEmit\nbun test v1.4.2 (744846f84)\n\nsrc\\engine\\doctor.test.ts:\n(pass) baseline readiness calculation > healthy baseline reports ok=true [0.08ms]\n(pass) baseline readiness calculation > absent schema is NOT_INITIALIZED, not a crash [0.02ms]\n(pass) baseline readiness calculation > null dimension verdict does not fail a fresh schema\n(pass) baseline readiness calculation > null dimension verdict does not fail an empty initialized store\n(pass) baseline readiness calculation > unreachable postgres is BACKEND_UNREACHABLE [0.02ms]\n(pass) baseline readiness calculation > missing pgvector or pg_trgm is EXTENSION_MISSING [0.01ms]\n(pass) baseline readiness calculation > unreachable embedding is EMBEDDING_UNAVAILABLE\n(pass) baseline readiness calculation > dimension mismatch stays fail-closed\n(pass) baseline readiness calculation > schema identity mismatch stays fail-closed\n(pass) product readiness calculation > healthy baseline plus ready subsystems is healthy [0.05ms]\n(pass) product readiness calculation > baseline failure propagates unchanged\n(pass) product readiness calculation > invalid trust or write policy is POLICY_INVALID [0.02ms]\n(pass) product readiness calculation > unready stores are SUBSYSTEM_FAILURE [0.01ms]\n(pass) dsn redaction > password redacted, user and endpoint visible [0.07ms]\n(pass) dsn redaction > no credentials left intact\n(skip) live doctor integration > absent schema returns NOT_INITIALIZED without throwing\n(skip) live doctor integration > unreachable postgres preserves the coded failure\n(skip) live doctor integration > fresh native setup reports whole-product healthy\n\n 15 pass\n 3 skip\n 0 fail\n 25 expect() calls\nRan 18 tests across 1 file. [30.00ms]\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbd8b1a7142bb77a8f7b965bf30"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbd9b950017K0GEaDUfMHwk1",
+      "role": "assistant",
+      "text": "Unit tests green — running live acceptance against the local database.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbda0377656b17dd242dbbdd062",
+          "name": "shell",
+          "input": {
+            "command": "Get-Content $HOME/.config/opencode/remembering.json; curl.exe -s http://localhost:11434/api/tags | Select-Object -First 3",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbda0377656b17dd242dbbdd062"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:5b630bfebd05136e",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbda0377656b17dd242dbbdd062",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "{\r\n  \"dsn\": \"postgresql://postgres:werewolf@localhost:5432/memory_baseline\",\r\n  \"python\": \"python\",\r\n  \"embedding\": {\r\n    \"provider\": \"ollama\",\r\n    \"model\": \"bge-m3\",\r\n    \"host\": \"http://localhost:11434\"\r\n  },\r\n  \"retrieval\": {\r\n    \"mode\": \"hybrid\",\r\n    \"lexical_k\": 30,\r\n    \"dense_k\": 30,\r\n    \"fusion_k\": 60,\r\n    \"rerank_k\": 8,\r\n    \"reranker\": \"none\"\r\n  },\r\n  \"context\": {\r\n    \"auto_inject\": true,\r\n    \"max_chars\": 4000,\r\n    \"max_results\": 6\r\n  }\r\n}\r\n{\"models\":[{\"name\":\"ornith-1.5:9b\",\"model\":\"ornith-1.5:9b\",\"modified_at\":\"2026-09-23T04:17:50.4181724+01:00\",\"size\":6550813657,\"digest\":\"e5df7dcdd8a263994df62d610317e07be0d6af23f96fcbd8543273058fce575e\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen35\",\"families\":[\"qwen35\"],\"parameter_size\":\"9.0B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":262144,\"embedding_length\":4096},\"capabilities\":[\"tools\",\"thinking\",\"completion\",\"vision\"]},{\"name\":\"codegpt/replit-code-v1_5-3b:latest\",\"model\":\"codegpt/replit-code-v1_5-3b:latest\",\"modified_at\":\"2026-08-07T13:19:56.8074407+01:00\",\"size\":1953055626,\"digest\":\"efa8d4ceea257f37c486c950529944804880ebc35ceef3fcac6cb5f996c6c7d9\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"mpt\",\"families\":[\"mpt\"],\"parameter_size\":\"3B\",\"quantization_level\":\"Q4_0\",\"context_length\":4096,\"embedding_length\":3072},\"capabilities\":[\"completion\"]},{\"name\":\"bge-m3:latest\",\"model\":\"bge-m3:latest\",\"modified_at\":\"2026-08-07T13:19:40.7910051+01:00\",\"size\":1157672605,\"digest\":\"7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"bert\",\"families\":[\"bert\"],\"parameter_size\":\"566.70M\",\"quantization_level\":\"F16\",\"context_length\":8192,\"embedding_length\":1024},\"capabilities\":[\"embedding\"]},{\"name\":\"batiai/qwen3.6-27b:q4\",\"model\":\"batiai/qwen3.6-27b:q4\",\"modified_at\":\"2026-08-07T13:19:24.8559036+01:00\",\"size\":16547401589,\"digest\":\"30824a1e4eaef7b2f603444477c24b3f5c23960c26cf2baf9d22462bc8651312\",\"details\":{\"parent_model\":\"/usr/share/ollama/.ollama/models/blobs/sha256-f741bb17c9e5eae6629f211aed5675edad1120504654b27704fcdf5653e6417b\",\"format\":\"gguf\",\"family\":\"qwen35\",\"families\":[\"qwen35\"],\"parameter_size\":\"26.9B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":262144,\"embedding_length\":5120},\"capabilities\":[\"completion\",\"tools\",\"thinking\"]},{\"name\":\"all-minilm:l6-v2\",\"model\":\"all-minilm:l6-v2\",\"modified_at\":\"2026-08-07T13:18:50.6169536+01:00\",\"size\":45960996,\"digest\":\"1b226e2802dbb772b5fc32a58f103ca1804ef7501331012de126ab22f67475ef\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"bert\",\"families\":[\"bert\"],\"parameter_size\":\"23M\",\"quantization_level\":\"F16\",\"context_length\":512,\"embedding_length\":384},\"capabilities\":[\"embedding\"]},{\"name\":\"qwen3-embedding:8b\",\"model\":\"qwen3-embedding:8b\",\"modified_at\":\"2026-08-04T15:09:29.430252+01:00\",\"size\":4676805193,\"digest\":\"64b933495768fbd3b87c20583d379728a07471e0c66733a9df87cd1901b3c44b\",\"details\":{\"parent_model\":\"/Users/ollama/.ollama/models/blobs/sha256-3fcd3febec8b3fd64435204db75bf0dd73b91e8d0661e0331acfe7e7c3120b85\",\"format\":\"gguf\",\"family\":\"qwen3\",\"families\":[\"qwen3\"],\"parameter_size\":\"7.6B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":40960,\"embedding_length\":4096},\"capabilities\":[\"tools\",\"embedding\"]},{\"name\":\"gemma4:latest\",\"model\":\"gemma4:latest\",\"modified_at\":\"2026-07-23T13:24:25.0594621+01:00\",\"size\":9608350718,\"digest\":\"c6eb396dbd5992bbe3f5cdb947e8bbc0ee413d7c17e2beaae69f5d569cf982eb\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"gemma4\",\"families\":[\"gemma4\"],\"parameter_size\":\"8.0B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":131072,\"embedding_length\":2560},\"capabilities\":[\"completion\",\"vision\",\"audio\",\"tools\",\"thinking\"]},{\"name\":\"mistral-nemo:latest\",\"model\":\"mistral-nemo:latest\",\"modified_at\":\"2026-05-22T13:25:49.3752517+01:00\",\"size\":7071713227,\"digest\":\"e7e06d107c6c86ed0cf45445f1790720b5092149c4c95f4d965844e9afbfdc89\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"12.2B\",\"quantization_level\":\"Q4_0\",\"context_length\":1024000,\"embedding_length\":5120},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"qwen3.5:latest\",\"model\":\"qwen3.5:latest\",\"modified_at\":\"2026-05-22T11:48:54.5607131+01:00\",\"size\":6594474711,\"digest\":\"6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen35\",\"families\":[\"qwen35\"],\"parameter_size\":\"9.7B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":262144,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"vision\",\"tools\",\"thinking\"]},{\"name\":\"qwen3.6:latest\",\"model\":\"qwen3.6:latest\",\"modified_at\":\"2026-04-24T08:48:10.6826337+01:00\",\"size\":23938333577,\"digest\":\"07d35212591fc27746f0a317c975a6d68754fb38e9053d82e25f06057af28522\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen35moe\",\"families\":[\"qwen35moe\"],\"parameter_size\":\"36.0B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":262144,\"embedding_length\":2048},\"capabilities\":[\"completion\",\"vision\",\"tools\",\"thinking\"]},{\"name\":\"mistral:latest\",\"model\":\"mistral:latest\",\"modified_at\":\"2026-03-25T15:57:30.0301699Z\",\"size\":4372824384,\"digest\":\"6577803aa9a036369e481d648a2baebb381ebc6e897f2bb9a766a2aa7bfbc1cf\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"7.2B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"qwen3-coder-next:latest\",\"model\":\"qwen3-coder-next:latest\",\"modified_at\":\"2026-02-06T20:24:23.4431598Z\",\"size\":51741611823,\"digest\":\"ca06e9e4087c714d44355bf954099187890e63084b4a632b8e9956c4b9492074\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen3next\",\"families\":[\"qwen3next\"],\"parameter_size\":\"79.7B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":262144,\"embedding_length\":2048},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"deepseek-r1:latest\",\"model\":\"deepseek-r1:latest\",\"modified_at\":\"2026-01-15T08:28:36.9571355Z\",\"size\":5225376047,\"digest\":\"6995872bfe4c521a67b32da386cd21d5c6e819b6e0d62f79f64ec83be99f5763\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen3\",\"families\":[\"qwen3\"],\"parameter_size\":\"8.2B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":131072,\"embedding_length\":4096},\"capabilities\":[\"tools\",\"thinking\",\"completion\"]},{\"name\":\"llama3.1:8b\",\"model\":\"llama3.1:8b\",\"modified_at\":\"2025-12-11T15:37:07.1587578Z\",\"size\":4920753328,\"digest\":\"46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"8.0B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":131072,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"ministral-3:8b\",\"model\":\"ministral-3:8b\",\"modified_at\":\"2025-12-03T16:45:22.5221437Z\",\"size\":6022224665,\"digest\":\"77300ee7514e14cacbee496270b49c5ce79a02acca789354eb37fa22197e0b72\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"mistral3\",\"families\":[\"mistral3\"],\"parameter_size\":\"8.9B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":262144,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"vision\",\"tools\"]},{\"name\":\"t1c/deepseek-math-7b-rl:latest\",\"model\":\"t1c/deepseek-math-7b-rl:latest\",\"modified_at\":\"2025-11-23T15:26:12.5886682Z\",\"size\":4223785222,\"digest\":\"5a7b7fcff0c2c3b0ddabb5152a65221c97765ee6692c0fa4c027012a5a70c037\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"7B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":4096,\"embedding_length\":4096},\"capabilities\":[\"completion\"]},{\"name\":\"mistral:7b-instruct\",\"model\":\"mistral:7b-instruct\",\"modified_at\":\"2025-11-21T14:49:39.8950281Z\",\"size\":4372824384,\"digest\":\"6577803aa9a036369e481d648a2baebb381ebc6e897f2bb9a766a2aa7bfbc1cf\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"7.2B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"qwen3:latest\",\"model\":\"qwen3:latest\",\"modified_at\":\"2025-11-21T14:49:39.2911862Z\",\"size\":5225388164,\"digest\":\"500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen3\",\"families\":[\"qwen3\"],\"parameter_size\":\"8.2B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":40960,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"tools\",\"thinking\"]},{\"name\":\"qwen2.5:0.5b\",\"model\":\"qwen2.5:0.5b\",\"modified_at\":\"2025-11-21T14:49:38.6851077Z\",\"size\":397821319,\"digest\":\"a8b0c51577010a279d933d14c2a8ab4b268079d44c5c8830c0a93900f1827c67\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],\"parameter_size\":\"494.03M\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":896},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"gemma3:latest\",\"model\":\"gemma3:latest\",\"modified_at\":\"2025-11-21T14:49:38.1070732Z\",\"size\":3338801804,\"digest\":\"a2af6cc3eb7fa8be8504abaf9b04e88f17a119ec3f04a3addf55f92841195f5a\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"gemma3\",\"families\":[\"gemma3\"],\"parameter_size\":\"4.3B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":131072,\"embedding_length\":2560},\"capabilities\":[\"completion\",\"vision\"]},{\"name\":\"smollm:latest\",\"model\":\"smollm:latest\",\"modified_at\":\"2025-11-21T14:49:37.4595047Z\",\"size\":990741362,\"digest\":\"95f6557a0f0f1e1d08ba0d426e50de0927dd2b0861a384b193802c551b298c28\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"1.7B\",\"quantization_level\":\"Q4_0\",\"context_length\":2048,\"embedding_length\":2048},\"capabilities\":[\"completion\"]},{\"name\":\"starcoder2:7b\",\"model\":\"starcoder2:7b\",\"modified_at\":\"2025-11-21T14:49:36.3061843Z\",\"size\":4042813088,\"digest\":\"1550ab21b10d3b3a53bcb13e628f3de773d9dbabe814d2315e5c0d8b9f3ef7e6\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"starcoder2\",\"families\":[\"starcoder2\"],\"parameter_size\":\"7B\",\"quantization_level\":\"Q4_0\",\"context_length\":16384,\"embedding_length\":4608},\"capabilities\":[\"completion\",\"insert\"]},{\"name\":\"exaone-deep:latest\",\"model\":\"exaone-deep:latest\",\"modified_at\":\"2025-11-21T14:49:36.8727783Z\",\"size\":4770665152,\"digest\":\"106afe416a9effa9570d04231c25192fc254ac1b51f0f1cafed20a32060958c9\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"exaone\",\"families\":[\"exaone\"],\"parameter_size\":\"7.8B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":4096},\"capabilities\":[\"completion\"]},{\"name\":\"qwen2.5-coder:latest\",\"model\":\"qwen2.5-coder:latest\",\"modified_at\":\"2025-11-21T14:49:35.7186981Z\",\"size\":4683087561,\"digest\":\"dae161e27b0e90dd1856c8bb3209201fd6736d8eb66298e75ed87571486f4364\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],\"parameter_size\":\"7.6B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":3584},\"capabilities\":[\"completion\",\"tools\",\"insert\"]},{\"name\":\"codellama:latest\",\"model\":\"codellama:latest\",\"modified_at\":\"2025-11-21T14:49:35.1170653Z\",\"size\":3825910662,\"digest\":\"8fdf8f752f6e80de33e82f381aba784c025982752cd1ae9377add66449d2225f\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":null,\"parameter_size\":\"7B\",\"quantization_level\":\"Q4_0\",\"context_length\":16384,\"embedding_length\":4096},\"capabilities\":[\"completion\"]},{\"name\":\"hf.co/ernanhughes/Fin-R1-Q8_0-GGUF:latest\",\"model\":\"hf.co/ernanhughes/Fin-R1-Q8_0-GGUF:latest\",\"modified_at\":\"2025-11-21T14:49:34.5356381Z\",\"size\":8098527042,\"digest\":\"d32443b1dfed554fb3e9b83d0809c594c06672e7a51c017876d0f99fb99d76b9\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],\"parameter_size\":\"7.62B\",\"quantization_level\":\"Q8_0\",\"context_length\":32768,\"embedding_length\":3584},\"capabilities\":[\"completion\",\"tools\",\"insert\"]},{\"name\":\"command-r7b:latest\",\"model\":\"command-r7b:latest\",\"modified_at\":\"2025-11-21T14:49:32.0297016Z\",\"size\":5057031198,\"digest\":\"ff4e9696ef9f19b62e3f7d7261c95dcc9bb15a7c0398493366d851119fe2e1ef\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"cohere2\",\"families\":[\"cohere2\"],\"parameter_size\":\"8.0B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":8192,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"qwen2.5:1.5b\",\"model\":\"qwen2.5:1.5b\",\"modified_at\":\"2025-11-21T14:49:32.6380921Z\",\"size\":986061892,\"digest\":\"65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],\"parameter_size\":\"1.5B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":1536},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"phi3:mini\",\"model\":\"phi3:mini\",\"modified_at\":\"2025-11-21T14:49:31.4552897Z\",\"size\":2176178913,\"digest\":\"4f222292793889a9a40a020799cfd28d53f3e01af25d48e06c5e708610fc47e9\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"phi3\",\"families\":[\"phi3\"],\"parameter_size\":\"3.8B\",\"quantization_level\":\"Q4_0\",\"context_length\":131072,\"embedding_length\":3072},\"capabilities\":[\"completion\"]},{\"name\":\"llama3.2:latest\",\"model\":\"llama3.2:latest\",\"modified_at\":\"2025-11-21T14:49:30.2341966Z\",\"size\":2019393189,\"digest\":\"a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"3.2B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":131072,\"embedding_length\":3072},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"openthinker:latest\",\"model\":\"openthinker:latest\",\"modified_at\":\"2025-11-21T14:49:30.8384354Z\",\"size\":4683085261,\"digest\":\"4e61774f7d1cf8904be3dabb60ca353f0a431b3cd97b822b42ab9354ca355f86\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],\"parameter_size\":\"7.6B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":3584},\"capabilities\":[\"tools\",\"completion\"]},{\"name\":\"deepseek-r1:8b\",\"model\":\"deepseek-r1:8b\",\"modified_at\":\"2025-11-21T14:49:29.6442536Z\",\"size\":5225376047,\"digest\":\"6995872bfe4c521a67b32da386cd21d5c6e819b6e0d62f79f64ec83be99f5763\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen3\",\"families\":[\"qwen3\"],\"parameter_size\":\"8.2B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":131072,\"embedding_length\":4096},\"capabilities\":[\"tools\",\"thinking\",\"completion\"]},{\"name\":\"orca-mini:latest\",\"model\":\"orca-mini:latest\",\"modified_at\":\"2025-11-21T14:49:29.0542215Z\",\"size\":1979947443,\"digest\":\"2dbd9f439647093cf773c325b0b3081a11f1b1426d61dee8b946f8f6555a1755\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":null,\"parameter_size\":\"3B\",\"quantization_level\":\"Q4_0\",\"context_length\":2048,\"embedding_length\":3200},\"capabilities\":[\"completion\"]},{\"name\":\"zephyr:latest\",\"model\":\"zephyr:latest\",\"modified_at\":\"2025-11-21T14:49:28.4949529Z\",\"size\":4109854934,\"digest\":\"bbe38b81adec6be8ff951d148864ed15a368aa2e8534a5092d444f184a56e354\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"7B\",\"quantization_level\":\"Q4_0\",\"context_length\":32768,\"embedding_length\":4096},\"capabilities\":[\"completion\"]},{\"name\":\"mistral-small:latest\",\"model\":\"mistral-small:latest\",\"modified_at\":\"2025-11-21T14:49:27.281054Z\",\"size\":14333921662,\"digest\":\"8039dd90c1138d772437a0779a33b7349efd5d9cca71edcd26e4dd463f90439d\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"23.6B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":5120},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"mistral:7b-instruct-v0.2-q8_0\",\"model\":\"mistral:7b-instruct-v0.2-q8_0\",\"modified_at\":\"2025-11-21T14:49:27.8728728Z\",\"size\":7696806087,\"digest\":\"3f321fd2a1c310d57053a59cb9139809c7945ddf4437f8b21b8f450dea4f2d5e\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"7B\",\"quantization_level\":\"Q8_0\",\"context_length\":32768,\"embedding_length\":4096},\"capabilities\":[\"completion\"]},{\"name\":\"nomic-embed-text:latest\",\"model\":\"nomic-embed-text:latest\",\"modified_at\":\"2025-11-21T14:49:26.1093407Z\",\"size\":274302450,\"digest\":\"0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"nomic-bert\",\"families\":[\"nomic-bert\"],\"parameter_size\":\"137M\",\"quantization_level\":\"F16\",\"context_length\":2048,\"embedding_length\":768},\"capabilities\":[\"embedding\"]},{\"name\":\"llava:7b\",\"model\":\"llava:7b\",\"modified_at\":\"2025-11-21T14:49:26.6703623Z\",\"size\":4733363377,\"digest\":\"8dd30f6b0cb19f555f2c7a7ebda861449ea2cc76bf1f44e262931f45fc81d081\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\",\"clip\"],\"parameter_size\":\"7B\",\"quantization_level\":\"Q4_0\",\"context_length\":32768,\"embedding_length\":4096},\"capabilities\":[\"completion\",\"vision\"]},{\"name\":\"qwen2.5:latest\",\"model\":\"qwen2.5:latest\",\"modified_at\":\"2025-11-21T14:49:25.5260849Z\",\"size\":4683087332,\"digest\":\"845dbda0ea48ed749caafd9e6037047aa19acfcfd82e704d7ca97d631a0b697e\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],\"parameter_size\":\"7.6B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":32768,\"embedding_length\":3584},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"mxbai-embed-large:latest\",\"model\":\"mxbai-embed-large:latest\",\"modified_at\":\"2025-11-21T14:49:24.9519388Z\",\"size\":669615493,\"digest\":\"468836162de7f81e041c43663fedbbba921dcea9b9fefea135685a39b2d83dd8\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"bert\",\"families\":[\"bert\"],\"parameter_size\":\"334M\",\"quantization_level\":\"F16\",\"context_length\":512,\"embedding_length\":1024},\"capabilities\":[\"embedding\"]},{\"name\":\"gemma:latest\",\"model\":\"gemma:latest\",\"modified_at\":\"2025-11-21T14:49:22.4075896Z\",\"size\":5011853225,\"digest\":\"a72c7f4d0a15522df81486d13ce432c79e191bda2558d024fbad4362c4f7cbf8\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"gemma\",\"families\":[\"gemma\"],\"parameter_size\":\"9B\",\"quantization_level\":\"Q4_0\",\"context_length\":8192,\"embedding_length\":3072},\"capabilities\":[\"completion\"]},{\"name\":\"phi3:latest\",\"model\":\"phi3:latest\",\"modified_at\":\"2025-11-21T14:49:21.8055016Z\",\"size\":2176178913,\"digest\":\"4f222292793889a9a40a020799cfd28d53f3e01af25d48e06c5e708610fc47e9\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"phi3\",\"families\":[\"phi3\"],\"parameter_size\":\"3.8B\",\"quantization_level\":\"Q4_0\",\"context_length\":131072,\"embedding_length\":3072},\"capabilities\":[\"completion\"]},{\"name\":\"phi4-mini:latest\",\"model\":\"phi4-mini:latest\",\"modified_at\":\"2025-11-21T14:49:21.1554617Z\",\"size\":2491876774,\"digest\":\"78fad5d182a7c33065e153a5f8ba210754207ba9d91973f57dffa7f487363753\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"phi3\",\"families\":[\"phi3\"],\"parameter_size\":\"3.8B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":131072,\"embedding_length\":3072},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"qwen:0.5b\",\"model\":\"qwen:0.5b\",\"modified_at\":\"2025-11-21T14:49:20.2889538Z\",\"size\":394998579,\"digest\":\"b5dc5e784f2a3ee1582373093acf69a2f4e2ac1710b253a001712b86a61f88bb\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen2\",\"families\":[\"qwen2\"],\"parameter_size\":\"620M\",\"quantization_level\":\"Q4_0\",\"context_length\":32768,\"embedding_length\":1024},\"capabilities\":[\"completion\"]},{\"name\":\"qwen3-coder:latest\",\"model\":\"qwen3-coder:latest\",\"modified_at\":\"2025-11-21T14:49:19.667624Z\",\"size\":18556700761,\"digest\":\"06c1097efce0431c2045fe7b2e5108366e43bee1b4603a7aded8f21689e90bca\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen3moe\",\"families\":[\"qwen3moe\"],\"parameter_size\":\"30.5B\",\"quantization_level\":\"Q4_K_M\",\"context_length\":262144,\"embedding_length\":2048},\"capabilities\":[\"completion\",\"tools\"]},{\"name\":\"qwen3:0.6b\",\"model\":\"qwen3:0.6b\",\"modified_at\":\"2025-11-21T14:49:19.0290492Z\",\"size\":522653767,\"digest\":\"7df6b6e09427a769808717c0a93cadc4ae99ed4eb8bf5ca557c90846becea435\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"qwen3\",\"families\":[\"qwen3\"],\"parameter_size\":\"751.63M\",\"quantization_level\":\"Q4_K_M\",\"context_length\":40960,\"embedding_length\":1024},\"capabilities\":[\"completion\",\"tools\",\"thinking\"]},{\"name\":\"gpt-oss:20b-cloud\",\"model\":\"gpt-oss:20b-cloud\",\"remote_model\":\"gpt-oss:20b\",\"remote_host\":\"https://ollama.com:443\",\"modified_at\":\"2025-11-21T14:49:18.1344863Z\",\"size\":381,\"digest\":\"875e8e3a629ad3c2e66f1f1c461e3d140474212f44a34f4687ae1d927db41690\",\"details\":{\"parent_model\":\"\",\"format\":\"\",\"family\":\"gptoss\",\"families\":[\"gptoss\"],\"parameter_size\":\"20.9B\",\"quantization_level\":\"MXFP4\",\"context_length\":131072,\"embedding_length\":2880},\"capabilities\":[\"completion\",\"tools\",\"thinking\"]},{\"name\":\"gpt-oss:120b-cloud\",\"model\":\"gpt-oss:120b-cloud\",\"remote_model\":\"gpt-oss:120b\",\"remote_host\":\"https://ollama.com:443\",\"modified_at\":\"2025-11-21T14:49:17.2697123Z\",\"size\":384,\"digest\":\"569662207105c69bb0eca2f79a3fdf8691ad6301def477a5ec66f8e8bae237e3\",\"details\":{\"parent_model\":\"\",\"format\":\"\",\"family\":\"gptoss\",\"families\":[\"gptoss\"],\"parameter_size\":\"116.8B\",\"quantization_level\":\"MXFP4\",\"context_length\":131072,\"embedding_length\":2880},\"capabilities\":[\"completion\",\"tools\",\"thinking\"]},{\"name\":\"smollm:1.7b\",\"model\":\"smollm:1.7b\",\"modified_at\":\"2025-11-21T14:49:16.3652405Z\",\"size\":990741362,\"digest\":\"95f6557a0f0f1e1d08ba0d426e50de0927dd2b0861a384b193802c551b298c28\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"1.7B\",\"quantization_level\":\"Q4_0\",\"context_length\":2048,\"embedding_length\":2048},\"capabilities\":[\"completion\"]},{\"name\":\"llama3.2:1b\",\"model\":\"llama3.2:1b\",\"modified_at\":\"2025-11-21T14:49:15.7555542Z\",\"size\":1321098329,\"digest\":\"baf6a787fdffd633537aa2eb51cfd54cb93ff08e28040095462bb63daf552878\",\"details\":{\"parent_model\":\"\",\"format\":\"gguf\",\"family\":\"llama\",\"families\":[\"llama\"],\"parameter_size\":\"1.2B\",\"quantization_level\":\"Q8_0\",\"context_length\":131072,\"embedding_length\":2048},\"capabilities\":[\"completion\",\"tools\"]}]}\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbda0377656b17dd242dbbdd062"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbda917001ypM3VKPNdPpJFF",
+      "role": "assistant",
+      "text": "Ollama has `bge-m3` and the config targets the fresh database. Running setup.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbdb4537362b5d8dc6939c20b0d",
+          "name": "shell",
+          "input": {
+            "command": "bun src/native-cli.ts setup --dir C:\\Projects\\opencode-remembering",
+            "timeout": 1200000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbdb4537362b5d8dc6939c20b0d"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:3e85860b8dbfa2e4",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbdb4537362b5d8dc6939c20b0d",
+          "name": "shell",
+          "result": {
+            "type": "content",
+            "value": [
+              {
+                "type": "text",
+                "text": "{\n  \"ok\": false,\n  \"native\": true,\n  \"code\": \"DB_UNREACHABLE\",\n  \"message\": \"DB_UNREACHABLE: cannot reach PostgreSQL: AggregateError: \"\n}\n"
+              },
+              {
+                "type": "text",
+                "text": "Exited with code 1"
+              }
+            ]
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbdb4537362b5d8dc6939c20b0d"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbdbac1001pGIzeksynbRWGN",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbdc166751897bb6c4dd1d0a30b",
+          "name": "shell",
+          "input": {
+            "command": "Get-NetTCPListener -State Listen | Where-Object { $_.LocalPort -in 5432,5433,5434 } | Select-Object LocalAddress, LocalPort; docker ps --format '{{.Names}} {{.Ports}} {{.Status}}' 2>$null; Get-Service *postgres* 2>$null | Select-Object Name, Status",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbdc166751897bb6c4dd1d0a30b"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:85ed7f602c0481a5",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbdc166751897bb6c4dd1d0a30b",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "\u001b[31;1mGet-NetTCPListener: \u001b[31;1mThe term 'Get-NetTCPListener' is not recognized as a name of a cmdlet, function, script file, or executable program.\u001b[0m\r\n\u001b[31;1m\u001b[31;1mCheck the spelling of the name, or if a path was included, verify that the path is correct and try again.\u001b[0m\r\n\r\n\u001b[32;1mName             \u001b[0m\u001b[32;1m  Status\u001b[0m\r\n\u001b[32;1m----             \u001b[0m \u001b[32;1m ------\u001b[0m\r\npostgresql-x64-16 Running\r\npostgresql-x64-17 Stopped\r\npostgresql-x64-18 Stopped\r\n\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbdc166751897bb6c4dd1d0a30b"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbdd6de001TMyRLN3hHsknKm",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbde240714a8daaa6c993a62528",
+          "name": "shell",
+          "input": {
+            "command": "bun -e '\nimport { Client } from \"pg\";\nfor (const port of [5432, 5433, 5434]) {\n  const c = new Client({ connectionString: `postgresql://postgres:werewolf@localhost:${port}/memory_baseline`, connectionTimeoutMillis: 3000 });\n  try { await c.connect(); console.log(port, \"connected\"); await c.end(); }\n  catch (e) { console.log(port, \"FAIL\", e.code ?? e.name, String(e.message).slice(0, 120)); }\n}\n'",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbde240714a8daaa6c993a62528"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:3be45e90f824d7a7",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbde240714a8daaa6c993a62528",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "5432 connected\n5433 FAIL ECONNREFUSED \n5434 FAIL ECONNREFUSED \n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbde240714a8daaa6c993a62528"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbdeb3c001N6DZXzwDBThkON",
+      "role": "assistant",
+      "text": "Port 5432 connects directly — checking for an env override and retrying.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbdfbb57726a31fd04e8d1b426d",
+          "name": "shell",
+          "input": {
+            "command": "bun -e 'console.log(\"MEMORY_BASELINE_DSN=\", process.env.MEMORY_BASELINE_DSN ?? \"(unset)\")'; bun src/native-cli.ts setup --dir C:\\Projects\\opencode-remembering",
+            "timeout": 1200000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbdfbb57726a31fd04e8d1b426d"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:49d849756ec4b3b4",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbdfbb57726a31fd04e8d1b426d",
+          "name": "shell",
+          "result": {
+            "type": "content",
+            "value": [
+              {
+                "type": "text",
+                "text": "MEMORY_BASELINE_DSN= postgresql://postgres:werewolf@localhost:5434/memory_baseline\n{\n  \"ok\": false,\n  \"native\": true,\n  \"code\": \"DB_UNREACHABLE\",\n  \"message\": \"DB_UNREACHABLE: cannot reach PostgreSQL: AggregateError: \"\n}\n"
+              },
+              {
+                "type": "text",
+                "text": "Exited with code 1"
+              }
+            ]
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbdfbb57726a31fd04e8d1b426d"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbe03c8001e8cf8bH6HdnEOH",
+      "role": "assistant",
+      "text": "Found it — a `MEMORY_BASELINE_DSN` env var points at dead port 5434 and overrides the config file. Checking scope.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbe19f6722e8ff3dee9c5dab31f",
+          "name": "shell",
+          "input": {
+            "command": "[Environment]::GetEnvironmentVariable(\"MEMORY_BASELINE_DSN\", \"User\"); [Environment]::GetEnvironmentVariable(\"MEMORY_BASELINE_DSN\", \"Machine\"); [Environment]::GetEnvironmentVariable(\"MEMORY_BASELINE_DSN\", \"Process\")",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbe19f6722e8ff3dee9c5dab31f"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:e5f14109a628e453",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbe19f6722e8ff3dee9c5dab31f",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "postgresql://postgres:werewolf@localhost:5432/memory_baseline\r\npostgresql://postgres:werewolf@localhost:5434/memory_baseline\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbe19f6722e8ff3dee9c5dab31f"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbe20bf001OPqkXe6IlRiKuC",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbe30767469a9e16278465c1109",
+          "name": "shell",
+          "input": {
+            "command": "$env:MEMORY_BASELINE_DSN=\"postgresql://postgres:werewolf@localhost:5432/memory_baseline\"; bun src/native-cli.ts setup --dir C:\\Projects\\opencode-remembering",
+            "timeout": 1200000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbe30767469a9e16278465c1109"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:a592845129d005c3",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbe30767469a9e16278465c1109",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "{\n  \"ok\": true,\n  \"schema\": \"remembering_b1d33534dd8e\",\n  \"embedding\": {\n    \"provider\": \"ollama\",\n    \"model\": \"bge-m3\",\n    \"dimension\": 1024,\n    \"version\": \"ollama:bge-m3:1024\"\n  }\n}\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbe30767469a9e16278465c1109"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbe418d001hMnzCevvYR8ccA",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbe44ea71b2b444e01629ae31ee",
+          "name": "shell",
+          "input": {
+            "command": "$env:MEMORY_BASELINE_DSN=\"postgresql://postgres:werewolf@localhost:5432/memory_baseline\"; bun src/native-cli.ts refresh --dir C:\\Projects\\opencode-remembering",
+            "timeout": 1200000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbe44ea71b2b444e01629ae31ee"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:f023177b71af81bb",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbe44ea71b2b444e01629ae31ee",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "{\n  \"ok\": true,\n  \"schema\": \"remembering_b1d33534dd8e\",\n  \"discovered\": 67,\n  \"indexed\": 67,\n  \"unchanged\": 0,\n  \"added\": 67,\n  \"changed\": 0,\n  \"removed\": 0,\n  \"chunks\": 719,\n  \"embedded\": 719,\n  \"failed\": [],\n  \"temporal\": {\n    \"imported\": 0,\n    \"duplicates\": 0,\n    \"failed\": [],\n    \"events\": 0,\n    \"subjects\": []\n  }\n}\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbe44ea71b2b444e01629ae31ee"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf042a001ocEC52UiWGEjym",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbf09bd72f4afe9e7f55ac1a9b3",
+          "name": "shell",
+          "input": {
+            "command": "$env:MEMORY_BASELINE_DSN=\"postgresql://postgres:werewolf@localhost:5432/memory_baseline\"; bun src/native-cli.ts doctor --dir C:\\Projects\\opencode-remembering; echo \"EXIT=$LASTEXITCODE\"",
+            "timeout": 300000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf09bd72f4afe9e7f55ac1a9b3"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:46de4fc84b9a29f8",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbf09bd72f4afe9e7f55ac1a9b3",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "{\n  \"ok\": true,\n  \"engine_root\": \"typescript:src/engine\",\n  \"engine_version\": \"remembering-engine-v0.1\",\n  \"engine_available\": true,\n  \"dsn_redacted\": \"postgresql://postgres:***@localhost:5432/memory_baseline\",\n  \"schema\": \"remembering_b1d33534dd8e\",\n  \"project_directory\": \"c:\\\\projects\\\\opencode-remembering\",\n  \"postgres_reachable\": true,\n  \"database_exists\": true,\n  \"pgvector_available\": true,\n  \"pgvector_version\": \"0.8.0\",\n  \"pg_trgm_available\": true,\n  \"schema_initialized\": true,\n  \"schema_identity_ok\": true,\n  \"embedding_provider_reachable\": true,\n  \"embedding_model_available\": true,\n  \"embedding_detail\": \"ollama model \\\"bge-m3\\\" present at http://localhost:11434\",\n  \"stored_embedding_version\": \"ollama:bge-m3:1024\",\n  \"stored_embedding_dimension\": 1024,\n  \"configured_embedding_version\": \"ollama:bge-m3\",\n  \"embedding_dimension_compatible\": true,\n  \"fts_index_present\": true,\n  \"hnsw_index_present\": true,\n  \"source_count\": 67,\n  \"chunk_count\": 719,\n  \"indexed\": true,\n  \"chunks\": 719,\n  \"readiness\": {\n    \"code\": \"HEALTHY\",\n    \"reasons\": []\n  },\n  \"message\": \"Remembering engine remembering-engine-v0.1 is ready: schema remembering_b1d33534dd8e holds 719 chunks from 67 sources.\",\n  \"native\": true,\n  \"python_dependencies\": {},\n  \"temporal\": {\n    \"store_ready\": true,\n    \"store_version\": \"temporal-store-v0.1\",\n    \"event_schema_version\": \"temporal-event-v0.1\",\n    \"reducer_version\": \"temporal-reducer-v0.1\",\n    \"events\": 0,\n    \"subjects\": [],\n    \"unknown_references\": [],\n    \"causality_violations\": [],\n    \"sequence_gaps\": []\n  },\n  \"frame\": {\n    \"project_frame_present\": false,\n    \"project_frame_valid\": true,\n    \"project_frame_version\": null,\n    \"project_frame_digest\": null,\n    \"known_work_types\": [],\n    \"framing_engine_version\": \"framing-engine-v0.1\",\n    \"frame_error\": null\n  },\n  \"trust\": {\n    \"trust_engine_version\": \"trust-engine-v0.1\",\n    \"configured\": false,\n    \"policy_source\": \"builtin_default\",\n    \"policy_version\": \"builtin-default-v0.1\",\n    \"policy_digest\": \"dc31b80830e275b3\",\n    \"policy_valid\": true,\n    \"instruction_screen_version\": \"instruction-screen-v0.1\",\n    \"standing_store_ready\": true,\n    \"standing_events\": 0,\n    \"revoked_sources\": [],\n    \"restricted_sources\": {},\n    \"policy_error\": null\n  },\n  \"selection\": {\n    \"select_engine_version\": \"select-engine-v0.1\",\n    \"policy_version\": \"decisive-selection-v0.1\",\n    \"budget_version\": \"context-budget-v0.1\",\n    \"redundancy_version\": \"redundancy-v0.1\",\n    \"provenance_version\": \"provenance-selection-v0.1\"\n  },\n  \"trace\": {\n    \"trace_engine_version\": \"trace-engine-v0.1\",\n    \"store_version\": \"trace-store-v0.1\",\n    \"schema_version\": \"context-trace-v0.1\",\n    \"replay_version\": \"trace-replay-v0.1\",\n    \"ready\": true,\n    \"trace_count\": 0,\n    \"oldest_trace\": null,\n    \"newest_trace\": null,\n    \"retention\": \"indefinite\"\n  },\n  \"loops\": {\n    \"loops_engine_version\": \"loops-engine-v0.1\",\n    \"store_version\": \"loops-store-v0.1\",\n    \"event_schema_version\": \"loop-event-v0.1\",\n    \"reducer_version\": \"loop-reducer-v0.1\",\n    \"closure_version\": \"loop-closure-v0.1\",\n    \"ready\": true,\n    \"event_count\": 0,\n    \"loop_count\": 0,\n    \"open\": 0,\n    \"completed\": 0,\n    \"cancelled\": 0,\n    \"superseded\": 0,\n    \"uncertain\": 0,\n    \"unresolved_evidence_refs\": []\n  },\n  \"writes\": {\n    \"write_engine_version\": \"write-engine-v0.1\",\n    \"store_version\": \"write-store-v0.1\",\n    \"record_schema_version\": \"explicit-memory-record-v0.1\",\n    \"action_schema_version\": \"memory-action-v0.1\",\n    \"relation_version\": \"memory-relation-v0.1\",\n    \"ready\": true,\n    \"policy\": {\n      \"configured\": false,\n      \"valid\": true,\n      \"version\": \"builtin-write-default-v0.1\",\n      \"digest\": \"e3c839193e313492\",\n      \"source\": \"builtin_default\",\n      \"error\": null\n    },\n    \"record_count\": 0,\n    \"action_count\": 0,\n    \"remember_count\": 0,\n    \"correct_count\": 0,\n    \"supersede_count\": 0,\n    \"retract_count\": 0,\n    \"relationship_count\": 0,\n    \"unresolved_index_records\": [],\n    \"last_action_at\": null\n  }\n}\nEXIT=0\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf09bd72f4afe9e7f55ac1a9b3"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf1202001jJT2o7Scp4f74c",
+      "role": "assistant",
+      "text": "`ok: true`, exit 0. Running the gated integration tests, full suite, and self-check.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbf1b0476dd89af23d4066bc888",
+          "name": "shell",
+          "input": {
+            "command": "$env:MEMORY_BASELINE_DSN=\"postgresql://postgres:werewolf@localhost:5432/memory_baseline\"; $env:REMEMBERING_INTEGRATION_TESTS=\"1\"; bun test src/engine/doctor.test.ts",
+            "timeout": 600000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf1b0476dd89af23d4066bc888"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:4f57163e6249faf2",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbf1b0476dd89af23d4066bc888",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "bun test v1.4.2 (744846f84)\n\nsrc\\engine\\doctor.test.ts:\n(pass) baseline readiness calculation > healthy baseline reports ok=true [0.07ms]\n(pass) baseline readiness calculation > absent schema is NOT_INITIALIZED, not a crash [0.02ms]\n(pass) baseline readiness calculation > null dimension verdict does not fail a fresh schema\n(pass) baseline readiness calculation > null dimension verdict does not fail an empty initialized store\n(pass) baseline readiness calculation > unreachable postgres is BACKEND_UNREACHABLE [0.02ms]\n(pass) baseline readiness calculation > missing pgvector or pg_trgm is EXTENSION_MISSING [0.01ms]\n(pass) baseline readiness calculation > unreachable embedding is EMBEDDING_UNAVAILABLE\n(pass) baseline readiness calculation > dimension mismatch stays fail-closed\n(pass) baseline readiness calculation > schema identity mismatch stays fail-closed\n(pass) product readiness calculation > healthy baseline plus ready subsystems is healthy [0.05ms]\n(pass) product readiness calculation > baseline failure propagates unchanged\n(pass) product readiness calculation > invalid trust or write policy is POLICY_INVALID [0.02ms]\n(pass) product readiness calculation > unready stores are SUBSYSTEM_FAILURE [0.01ms]\n(pass) dsn redaction > password redacted, user and endpoint visible [0.07ms]\n(pass) dsn redaction > no credentials left intact\n(pass) live doctor integration > absent schema returns NOT_INITIALIZED without throwing [59.09ms]\n(pass) live doctor integration > unreachable postgres preserves the coded failure [2.31ms]\n(pass) live doctor integration > fresh native setup reports whole-product healthy [1258.88ms]\n\n 18 pass\n 0 fail\n 30 expect() calls\nRan 18 tests across 1 file. [1330.00ms]\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf1b0476dd89af23d4066bc888"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf266b001tWMIXjM6MobxRN",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbf2d8472fd973eab9c8b1df642",
+          "name": "shell",
+          "input": {
+            "command": "bun run check; bun run build; git diff --check",
+            "timeout": 600000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf2d8472fd973eab9c8b1df642"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:4b243ed1ae9f263f",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbf2d8472fd973eab9c8b1df642",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "$ bun run typecheck && bun test\n$ tsc --noEmit\nbun test v1.4.2 (744846f84)\n\nsrc\\client-cutover.test.ts:\n(pass) ProjectMemoryClient native delegation > search delegates without subprocess [0.22ms]\n(pass) ProjectMemoryClient native delegation > remember maps camelCase input to the engine and snake_case output back [0.20ms]\n(pass) ProjectMemoryClient native delegation > context validates route client-side before delegating [0.17ms]\n(pass) ProjectMemoryClient native delegation > trace fans out to engine operations by mode [0.17ms]\n(pass) ProjectMemoryClient native delegation > loops validate client-side; writes delegate [0.16ms]\n(pass) ProjectMemoryClient native delegation > state and temporal import delegate with standpoint mapping [0.18ms]\n\nsrc\\config.test.ts:\n(pass) schemaForProject > is deterministic for the same directory [0.49ms]\n(pass) schemaForProject > isolates different repositories [0.43ms]\n(pass) validateSchemaName > legacy project_memory_root fails closed [0.80ms]\n(pass) validateSchemaName > accepts safe identifiers [0.04ms]\n(pass) validateSchemaName > fails closed on injection attempts [0.06ms]\n\nsrc\\context.test.ts:\n(pass) latestUserText > finds the latest user text across common message shapes [0.15ms]\n(pass) latestUserText > returns empty when no user text is available [0.01ms]\n(pass) isMeaningfulQuery > rejects empty and trivial queries [0.08ms]\n(pass) isMeaningfulQuery > accepts real work signals\n(pass) renderInjectedMemory > keeps trace and schema visible [0.06ms]\n(pass) renderInjectedMemory > states the retrieval-vs-influence boundary [0.04ms]\n(pass) extractCaptureMessages > captures role, text and message ids [0.17ms]\n(pass) extractCaptureMessages > collects tool-call and tool-result parts [0.03ms]\n(pass) extractCaptureMessages > drops empty messages [0.01ms]\n(pass) extractSessionFacts > extracts session id, agent and model ref [0.04ms]\n(pass) extractSessionFacts > handles missing event gracefully [0.02ms]\n\nsrc\\hook.test.ts:\n(pass) context hook > injects a bounded bundle after capture [0.42ms]\n(pass) context hook > recall request injects a recall bundle [0.09ms]\n(pass) context hook > action request injects an influence bundle [0.07ms]\n(pass) context hook > ambiguous request uses the conservative policy visibly [0.07ms]\n(pass) context hook > injected wrapper carries route and temporal mode [0.09ms]\n(pass) context hook > no injection when the store is uninitialized [0.06ms]\n(pass) context hook > no injection for trivial queries, but capture still runs [0.07ms]\n[opencode-remembering] session capture failed: Error: disk full (simulated)\n[opencode-remembering] memory context failed: Error: DB_UNREACHABLE: cannot reach PostgreSQL\n(pass) context hook > a failed memory lookup never breaks the session [0.15ms]\n(pass) context hook > empty memory content is not injected [0.05ms]\n(pass) isSecurityFailure > detects isolation failures [0.03ms]\n(pass) extractWorkSignals > builds user, agent, tool, and test-failure signals [0.10ms]\n(pass) extractWorkSignals > canonical history is not dumped into signals [0.02ms]\n(pass) extractWorkSignals > hook passes caller scope and renders trust policy [0.10ms]\n[opencode-remembering] session capture failed: TypeError: client.captureSession is not a function. (In 'client.captureSession(facts.sessionId, {\n          agent: facts.agent,\n          provider: facts.provider,\n          model: facts.model,\n      \n(pass) extractWorkSignals > hook passes auto work signals and renders frame attrs [0.14ms]\n\nsrc\\no-python-runtime.test.ts:\n(pass) native runtime has no legacy runtime dependency > src/ and index.ts contain no subprocess/legacy references [5.49ms]\n\nsrc\\tools.test.ts:\n(pass) memory tools > memory_health returns the doctor report [0.19ms]\n(pass) memory tools > memory_setup returns the setup report [0.10ms]\n(pass) memory tools > memory_refresh surfaces the refresh report [0.07ms]\n(pass) memory tools > memory_search keeps provenance and trace [0.12ms]\n(pass) memory tools > memory_context returns bundle fields [0.18ms]\n(pass) memory tools > memory_context forwards an explicit route [0.08ms]\n(pass) memory tools > memory_context forwards a temporal standpoint [0.08ms]\n(pass) memory tools > memory_context forwards trust options [0.08ms]\n(pass) memory tools > memory_context forwards selection mode [0.08ms]\n(pass) memory tools > memory_state returns resolved state [0.10ms]\n(pass) memory tools > engine failures propagate instead of returning fake results [0.05ms]\n(pass) memory tools > memory_trace get/explain/verify delegate to the engine [0.14ms]\n(pass) memory tools > memory_open_loops lists and gets loops [0.12ms]\n(pass) memory tools > memory_open_loops validates input client-side [0.23ms]\n(pass) memory tools > memory_trace rejects invalid modes client-side [0.10ms]\n(pass) memory tools > memory_remember returns the structured write result [0.16ms]\n(pass) memory tools > memory_remember validates action and role client-side [0.11ms]\n\nsrc\\engine\\context.test.ts:\n(pass) native context pipeline > auto route is deterministic and reports ambiguity [0.14ms]\n(pass) native context pipeline > influence denies revoked sources; recall preserves them [0.50ms]\n(pass) native context pipeline > instruction-like content is quarantined from influence only [0.06ms]\n(pass) native context pipeline > content renders with provenance and admission note [0.03ms]\n\nsrc\\engine\\doctor.test.ts:\n(pass) baseline readiness calculation > healthy baseline reports ok=true [0.05ms]\n(pass) baseline readiness calculation > absent schema is NOT_INITIALIZED, not a crash [0.01ms]\n(pass) baseline readiness calculation > null dimension verdict does not fail a fresh schema\n(pass) baseline readiness calculation > null dimension verdict does not fail an empty initialized store\n(pass) baseline readiness calculation > unreachable postgres is BACKEND_UNREACHABLE\n(pass) baseline readiness calculation > missing pgvector or pg_trgm is EXTENSION_MISSING [0.01ms]\n(pass) baseline readiness calculation > unreachable embedding is EMBEDDING_UNAVAILABLE\n(pass) baseline readiness calculation > dimension mismatch stays fail-closed\n(pass) baseline readiness calculation > schema identity mismatch stays fail-closed\n(pass) product readiness calculation > healthy baseline plus ready subsystems is healthy [0.04ms]\n(pass) product readiness calculation > baseline failure propagates unchanged\n(pass) product readiness calculation > invalid trust or write policy is POLICY_INVALID [0.02ms]\n(pass) product readiness calculation > unready stores are SUBSYSTEM_FAILURE\n(pass) dsn redaction > password redacted, user and endpoint visible [0.05ms]\n(pass) dsn redaction > no credentials left intact\n(skip) live doctor integration > absent schema returns NOT_INITIALIZED without throwing\n(skip) live doctor integration > unreachable postgres preserves the coded failure\n(skip) live doctor integration > fresh native setup reports whole-product healthy\n\nsrc\\engine\\no-python.test.ts:\n(pass) native engine has no Python runtime dependency > src/engine contains no bridge/spawn/psycopg references [2.50ms]\n\nsrc\\engine\\parity.test.ts:\n(pass) hashing embedder parity (baseline/embeddings.py) > token-hash buckets are deterministic and L2-normalized [0.27ms]\n(pass) hashing embedder parity (baseline/embeddings.py) > different tokens land in different buckets [0.41ms]\n(pass) ingest parity (baseline/ingest.py) > sha1 matches Python hashlib.sha1 [0.05ms]\n(pass) ingest parity (baseline/ingest.py) > fixed chunking overlaps like the Python port [0.08ms]\n(pass) ingest parity (baseline/ingest.py) > section chunking keeps headings [0.23ms]\n(pass) ingest parity (baseline/ingest.py) > sentence chunking is deterministic [0.19ms]\n(pass) ingest parity (baseline/ingest.py) > chunk ids match the Python scheme (16 hex chars, deterministic) [0.22ms]\n(pass) ingest parity (baseline/ingest.py) > cosine self-similarity is 1 [0.04ms]\n\nsrc\\engine\\retrieval.test.ts:\n(pass) reciprocal_rank_fusion parity (baseline/retrieval.py) > single ranking preserves order with RRF scores [0.16ms]\n(pass) reciprocal_rank_fusion parity (baseline/retrieval.py) > shared hits outrank single-list hits; ties break by chunk_id [0.04ms]\n(pass) reciprocal_rank_fusion parity (baseline/retrieval.py) > fusion k changes absolute scores but not this ordering [0.02ms]\n(pass) overlap reranker parity > orders by token overlap then chunk_id [0.13ms]\n(pass) overlap reranker parity > respects k [0.02ms]\n(pass) Retriever stage semantics > lexical mode never calls the embedder [0.40ms]\n(pass) Retriever stage semantics > hybrid fuses both stages and records latencies [0.11ms]\n(pass) Retriever stage semantics > cross-encoder reranker is refused by the TS engine [0.06ms]\n\nsrc\\engine\\frame\\frame.test.ts:\n(pass) work framing > no frame configured disables framing without failure [0.12ms]\n(pass) work framing > invalid frame fails closed [0.08ms]\n(pass) work framing > explicit known work type declares hard control [0.02ms]\n(pass) work framing > explicit unknown work type is query-only [0.01ms]\n(pass) work framing > none mode disables framing\n(pass) work framing > auto signal match corroborates; conflict is query-only [0.08ms]\n(pass) work framing > insufficient evidence yields unknown without control [0.02ms]\n(pass) work framing > digest is deterministic [0.03ms]\n\nsrc\\engine\\loops\\loops.test.ts:\n(pass) open loops > create opens; evidence accrues; complete resolves [0.31ms]\n(pass) open loops > incomplete closure holds at uncertain instead of completing [0.05ms]\n(pass) open loops > terminal loops reject further transitions; invalid states fail [0.22ms]\n(pass) open loops > cancel and supersede are terminal; reducer is deterministic [0.04ms]\n(pass) open loops > memory store is idempotent and rebuilds from events [0.12ms]\n\nsrc\\engine\\selection\\selection.test.ts:\n(pass) decisive selection > empty set selects nothing [0.05ms]\n(pass) decisive selection > decisive drops low-value and redundant evidence visibly [0.07ms]\n(pass) decisive selection > full mode keeps duplicates but still budgets [0.02ms]\n(pass) decisive selection > budget truncation is observable [0.06ms]\n(pass) decisive selection > provenance is retained; same input is deterministic [0.04ms]\n\nsrc\\engine\\temporal\\temporal.test.ts:\n(pass) temporal reducer > empty history resolves unknown with incomplete flag [0.08ms]\n(pass) temporal reducer > current event resolves value [0.27ms]\n(pass) temporal reducer > future-effective state is planned, not current [0.09ms]\n(pass) temporal reducer > supersession preserves lineage; retraction preserves history [0.07ms]\n(pass) temporal reducer > valid_at / as_known / bitemporal standpoints [0.10ms]\n(pass) temporal reducer > unknown references and causality violations are visible [0.05ms]\n(pass) temporal reducer > conflicting event identity fails loudly; duplicates are idempotent [0.16ms]\n(pass) temporal reducer > invalid timestamps and transitions fail visibly [0.04ms]\n(pass) temporal reducer > service import counts duplicates and failures locally [0.32ms]\n\nsrc\\engine\\trace\\trace.test.ts:\n(pass) context trace > creation persists immutably; find filters work [0.34ms]\n(pass) context trace > explain isolates one candidate; invalid ids fail [0.19ms]\n(pass) context trace > verification detects tampering [0.10ms]\n(pass) context trace > replay never mutates the original; persisted replay links back [0.19ms]\n(pass) context trace > diff reports membership and stage changes [0.18ms]\n\nsrc\\engine\\trust\\trust.test.ts:\n(pass) trust and standing > builtin default policy is conservative [0.04ms]\n(pass) trust and standing > explicit grants admit matching sources [0.16ms]\n(pass) trust and standing > malformed policy fails closed [0.05ms]\n(pass) trust and standing > revocation denies influence but preserves recall evidence [0.08ms]\n(pass) trust and standing > restriction caps effective level [0.05ms]\n(pass) trust and standing > instruction-like content is flagged; stored text cannot escalate trust [0.09ms]\n(pass) trust and standing > policy digest is deterministic [0.02ms]\n\nsrc\\engine\\write\\write.test.ts:\n(pass) explicit memory writes > remember creates lineage and authorizes [0.50ms]\n(pass) explicit memory writes > idempotency key deduplicates [0.09ms]\n(pass) explicit memory writes > correct and supersede preserve lineage; original stays in history [0.09ms]\n(pass) explicit memory writes > retraction preserves the record; double retract and correct-after-retract fail [0.09ms]\n(pass) explicit memory writes > authorization denies production_state without evidence and unknown roles [0.08ms]\n(pass) explicit memory writes > missing target fails with NOT_FOUND; history is queryable [0.10ms]\n(pass) explicit memory writes > write policy authorizes scopes explicitly [0.02ms]\n\n3 tests skipped:\n(skip) live doctor integration > absent schema returns NOT_INITIALIZED without throwing\n(skip) live doctor integration > unreachable postgres preserves the coded failure\n(skip) live doctor integration > fresh native setup reports whole-product healthy\n\n 136 pass\n 3 skip\n 0 fail\n 323 expect() calls\nRan 139 tests across 18 files. [89.00ms]\n$ bun build ./index.ts --outdir ./dist --target node --format esm --packages external\nBundled 40 modules in 8ms\n\n  index.js  221.0 KB  (entry point)\n\nwarning: in the working copy of '.remembering/sessions/ses_f30ed28abffe7W62JQ2h39g3vF.json', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/doctor.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/errors.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/index.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/pipeline.ts', LF will be replaced by CRLF the next time Git touches it\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf2d8472fd973eab9c8b1df642"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf3be6001LAoCPBmA9axJtd",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbf434a71569e17f2f421c7cde2",
+          "name": "shell",
+          "input": {
+            "command": ".\\remembering-self-check.cmd",
+            "timeout": 600000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf434a71569e17f2f421c7cde2"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:541484521578f064",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbf434a71569e17f2f421c7cde2",
+          "name": "shell",
+          "result": {
+            "type": "content",
+            "value": [
+              {
+                "type": "text",
+                "text": "\r\nStarting OpenCode Remembering self-check...\r\n\r\n\n============================================================\n OpenCode Remembering - Self Check\n============================================================\nPlugin:  C:\\Projects\\opencode-remembering\nProject: C:\\Projects\\opencode-remembering\n\n[PASS]  Plugin directory exists\n         C:\\Projects\\opencode-remembering\n[PASS]  Package identity\n         opencode-remembering v0.0.1\n[PASS]  OpenCode plugin ID\n         opencode-remembering\n[PASS]  Native JS runtime guard\n         no-python-runtime.test.ts is present\n[PASS]  Native engine CLI present\n         src\\native-cli.ts\n[PASS]  Bun available\n         1.4.2\n[PASS]  OpenCode available\n         opencode v2.0.15\n[PASS]  Compiled plugin present\n         dist\\index.js\n[PASS]  OpenCode configuration references plugin\n         C:\\Users\\ernan\\.config\\opencode\\opencode.jsonc\n\nRunning native memory health check...\n[FAIL]  Remembering native doctor\n         Exit code 1\n[FAIL]  Engine reports healthy\n         DB_UNREACHABLE: cannot reach PostgreSQL: AggregateError: \n\n============================================================\n REMEMBERING NOT READY\n 2 failure(s), 0 warning(s).\n============================================================\n\nInside OpenCode, memory_health / memory_context / memory_trace\nconfirm that the live plugin tool surface has registered.\n\n\r\nSelf-check finished: NOT READY\r\n\r\nPress any key to continue . . . \r\n"
+              },
+              {
+                "type": "text",
+                "text": "Exited with code 1"
+              }
+            ]
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf434a71569e17f2f421c7cde2"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf4b2f001R8FcoEualnxlGa",
+      "role": "assistant",
+      "text": "Self-check still fails — isolating whether it's the environment or the command.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbf5a3f75dd90a542e9486f1546",
+          "name": "shell",
+          "input": {
+            "command": "Get-Content remembering-self-check.cmd; cmd /c \"echo DSN=%MEMORY_BASELINE_DSN%\"",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf5a3f75dd90a542e9486f1546"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:041b30c337383907",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbf5a3f75dd90a542e9486f1546",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "@echo off\r\nsetlocal\r\ncd /d \"%~dp0\"\r\n\r\necho.\r\necho Starting OpenCode Remembering self-check...\r\necho.\r\n\r\nset \"PROJECT_ARG=%~1\"\r\n\r\nif \"%PROJECT_ARG%\"==\"\" (\r\n  powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0remembering-self-check.ps1\"\r\n) else (\r\n  powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0remembering-self-check.ps1\" -Project \"%PROJECT_ARG%\"\r\n)\r\n\r\nset \"RC=%ERRORLEVEL%\"\r\necho.\r\nif \"%RC%\"==\"0\" (\r\n  echo Self-check finished: READY\r\n) else (\r\n  echo Self-check finished: NOT READY\r\n)\r\necho.\r\npause\r\nexit /b %RC%\r\nDSN=postgresql://postgres:werewolf@localhost:5434/memory_baseline\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf5a3f75dd90a542e9486f1546"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf608a001AmN5ikEUVK0iUR",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbf7727774cbe0e899e7c1b6a30",
+          "name": "shell",
+          "input": {
+            "command": "Write-Host \"User=[$([Environment]::GetEnvironmentVariable('MEMORY_BASELINE_DSN','User'))]\"; Write-Host \"Machine=[$([Environment]::GetEnvironmentVariable('MEMORY_BASELINE_DSN','Machine'))]\"; Write-Host \"Process=[$([Environment]::GetEnvironmentVariable('MEMORY_BASELINE_DSN','Process'))]\"",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf7727774cbe0e899e7c1b6a30"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:752fa32752171396",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbf7727774cbe0e899e7c1b6a30",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "User=[]\r\nMachine=[postgresql://postgres:werewolf@localhost:5432/memory_baseline]\r\nProcess=[postgresql://postgres:werewolf@localhost:5434/memory_baseline]\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf7727774cbe0e899e7c1b6a30"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf7f0e001LjJOaHVHhCP2xy",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbf879b7039be9a48b78aa5e8b8",
+          "name": "shell",
+          "input": {
+            "command": "Remove-Item Env:\\MEMORY_BASELINE_DSN; .\\remembering-self-check.cmd",
+            "timeout": 600000,
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf879b7039be9a48b78aa5e8b8"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:9b7ccd79fad02282",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbf879b7039be9a48b78aa5e8b8",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "\r\nStarting OpenCode Remembering self-check...\r\n\r\n\n============================================================\n OpenCode Remembering - Self Check\n============================================================\nPlugin:  C:\\Projects\\opencode-remembering\nProject: C:\\Projects\\opencode-remembering\n\n[PASS]  Plugin directory exists\n         C:\\Projects\\opencode-remembering\n[PASS]  Package identity\n         opencode-remembering v0.0.1\n[PASS]  OpenCode plugin ID\n         opencode-remembering\n[PASS]  Native JS runtime guard\n         no-python-runtime.test.ts is present\n[PASS]  Native engine CLI present\n         src\\native-cli.ts\n[PASS]  Bun available\n         1.4.2\n[PASS]  OpenCode available\n         opencode v2.0.15\n[PASS]  Compiled plugin present\n         dist\\index.js\n[PASS]  OpenCode configuration references plugin\n         C:\\Users\\ernan\\.config\\opencode\\opencode.jsonc\n\nRunning native memory health check...\n[PASS]  Remembering native doctor\n         PostgreSQL/config/embedding readiness check completed successfully\n[PASS]  Engine reports healthy\n         ok=true\n[INFO]  Project schema\n         remembering_b1d33534dd8e\n[INFO]  Database endpoint\n         postgresql://postgres:***@localhost:5432/memory_baseline\n[INFO]  Readiness\n         HEALTHY\n\n============================================================\n REMEMBERING READY\n All checks passed.\n============================================================\n\nInside OpenCode, memory_health / memory_context / memory_trace\nconfirm that the live plugin tool surface has registered.\n\n\r\nSelf-check finished: READY\r\n\r\nPress any key to continue . . . \r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbf879b7039be9a48b78aa5e8b8"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbf917d001IAA3VFY0opPFZb",
+      "role": "assistant",
+      "text": "`REMEMBERING READY` — recording the fix and closing out.",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbfa11c75c38352eae6d5fb39e7",
+          "name": "shell",
+          "input": {
+            "command": "bun -e '\nimport * as fs from \"node:fs\";\nfs.appendFileSync(\"HANDOFF.md\", `\n## Health/readiness contract fix\n\nRoot cause: doctorBaseline() built the report with ok:false and never recomputed\nit, so a healthy native runtime still reported ok=false (CLI exit 1).\n\nFix: src/engine/readiness.ts (pure readiness calculus) + doctorBaseline() now sets\nok/readiness/message from probed state; nativeDoctor() folds subsystem sections\n(trust/write policy validity, store readiness, loop projection errors) into a\nwhole-product readiness. Fresh DB returns ok=false/NOT_INITIALIZED without throwing;\nSCHEMA_MISMATCH and DIMENSION_MISMATCH stay fail-closed throws. Added readiness\ncodes: HEALTHY, NOT_INITIALIZED, BACKEND_UNREACHABLE, EXTENSION_MISSING,\nEMBEDDING_UNAVAILABLE, DIMENSION_MISMATCH, SCHEMA_MISMATCH, POLICY_INVALID,\nSUBSYSTEM_FAILURE. DSN redaction now preserves user/host and redacts only the\npassword. Self-check shows database endpoint + readiness code.\n\nNote: a stale session-level MEMORY_BASELINE_DSN (port 5434) can shadow the\nmachine-level value (port 5432); env precedence is unchanged by design.\n`);\nconsole.log(\"ok\");\n'; git diff --check; git status --short | Select-Object -First 12",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbfa11c75c38352eae6d5fb39e7"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:681960a396472e34",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbfa11c75c38352eae6d5fb39e7",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": "ok\nwarning: in the working copy of '.remembering/sessions/ses_f30ed28abffe7W62JQ2h39g3vF.json', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'HANDOFF.md', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/doctor.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/errors.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/index.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/engine/pipeline.ts', LF will be replaced by CRLF the next time Git touches it\n M .remembering/sessions/ses_f30ed28abffe7W62JQ2h39g3vF.json\r\n M HANDOFF.md\r\n M src/engine/doctor.ts\r\n M src/engine/errors.ts\r\n M src/engine/index.ts\r\n M src/engine/pipeline.ts\r\n?? remembering-self-check.cmd\r\n?? remembering-self-check.ps1\r\n?? src/engine/doctor.test.ts\r\n?? src/engine/readiness.ts\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbfa11c75c38352eae6d5fb39e7"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg_0cfbfb24a001MVUImn5NKAvhR2",
+      "role": "assistant",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [
+        {
+          "type": "tool-call",
+          "id": "call_01a0cfbfc31477cf94b12502506b7680",
+          "name": "shell",
+          "input": {
+            "command": "git checkout -- .remembering/sessions/ses_f30ed28abffe7W62JQ2h39g3vF.json; git status --short | Select-Object -First 12",
+            "workdir": "C:\\Projects\\opencode-remembering"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbfc31477cf94b12502506b7680"
+            }
+          }
+        }
+      ],
+      "tool_results": [],
+      "observed_at": "2026-09-23T19:30:48.950Z"
+    },
+    {
+      "id": "msg:8b3a60b2840624a0",
+      "role": "tool",
+      "text": "",
+      "agent": "build",
+      "model": null,
+      "tool_calls": [],
+      "tool_results": [
+        {
+          "type": "tool-result",
+          "id": "call_01a0cfbfc31477cf94b12502506b7680",
+          "name": "shell",
+          "result": {
+            "type": "text",
+            "value": " M HANDOFF.md\r\n M src/engine/doctor.ts\r\n M src/engine/errors.ts\r\n M src/engine/index.ts\r\n M src/engine/pipeline.ts\r\n?? remembering-self-check.cmd\r\n?? remembering-self-check.ps1\r\n?? src/engine/doctor.test.ts\r\n?? src/engine/readiness.ts\r\n"
+          },
+          "providerExecuted": false,
+          "providerMetadata": {
+            "openai": {
+              "itemId": "fc_01a0cfbfc31477cf94b12502506b7680"
+            }
+          }
+        }
+      ],
+      "observed_at": "2026-09-23T19:30:48.950Z"
     }
   ]
 }
