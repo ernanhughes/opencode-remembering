@@ -194,6 +194,16 @@ bun src/dev-cli.ts trust-health
 bun src/dev-cli.ts trust-import
 bun src/dev-cli.ts trust-eval
 bun src/dev-cli.ts context "Fix the migration." --caller-scope coding_agent
+bun src/dev-cli.ts selection-eval
+bun src/dev-cli.ts context "Implement the migration." --selection full
+bun src/dev-cli.ts context "Implement the migration." --selection decisive
+bun src/dev-cli.ts trace get <trace-id>
+bun src/dev-cli.ts trace find --source docs/adr/017.md
+bun src/dev-cli.ts trace verify <trace-id>
+bun src/dev-cli.ts trace explain <trace-id> --candidate <chunk-id>
+bun src/dev-cli.ts trace replay <trace-id> --kind trust
+bun src/dev-cli.ts trace diff <trace-a> <trace-b>
+bun src/dev-cli.ts trace-eval
 ```
 
 ## Tools
@@ -359,6 +369,60 @@ hidden `malicious` flag.
 
 > **A temporally current, correctly framed record is not automatically
 > trustworthy. Marked visibility is not claimed as injection-proof.**
+
+## Decisive selection (Stage 6)
+
+Admission is permission; selection is necessity. Of the admitted
+candidates, the smallest provenance-bearing set is selected:
+
+- **Decisive**: current authoritative decisions/state, active
+  project constraints, negative evidence that blocks a bad action,
+  material disagreements (both sides, never merged).
+- **Supporting**: independent benchmarks/tests, frame-preferred
+  evidence, grounding provenance pulled in to license derived claims.
+- **Contextual** loses to the above; **redundant** echoes
+  (shared claim keys, shared derivation roots, identical spans)
+  collapse to one representative.
+
+Disagreement is rendered in separate sections, never merged into
+fluent consensus. No LLM selector, no scalar importance score, no
+summarization. Recall preserves broadly instead of compressing.
+
+## Durable ContextTrace (Stage 7)
+
+Every context construction persists an immutable content-addressed
+trace (`ctx_<sha256>`) **before** the bundle is returned. Influence
+refuses injection when persistence fails (`TRACE_PERSIST_FAILED`);
+recall degrades to an unpersisted trace rather than failing.
+
+- **Candidate lifecycle**: every retrieved candidate carries its
+  staged path (retrieval ranks/paths, temporal status, frame
+  eligibility, trust verdict, selection disposition) plus a terminal
+  stage (`FINAL_SELECTED`, `TEMPORAL_SUPPRESSED`, `FRAME_EXCLUDED`,
+  `TRUST_DENIED`, `TRUST_QUARANTINED`, `SELECTION_REDUNDANT`,
+  `SELECTION_LOW_VALUE`, `SELECTION_BUDGET`). Stages that never ran
+  read `not_reached` — never fabricated.
+- **Digests**: trace ID (semantic identity, timings excluded),
+  bundle digest (exact rendered content), candidate-pool digest
+  (order-independent), input digest. Tampering is detected, not
+  repaired.
+- **Lookup**: `memory_trace` supports exact fetch, filtered search
+  (source/chunk/route/policy/terminal stage), deterministic candidate
+  explanation, integrity verification, bounded trust/selection
+  replay, and structured diff. Counterfactual replays get their own
+  IDs, never mutate the original, and state their frozen evidence
+  boundary.
+- **Isolation**: per-project trace tables; cross-project fetch fails
+  closed. Traces are audit state, never re-ingested as memory; no
+  secrets are persisted; retention defaults to indefinite.
+
+> A ContextTrace is the preserved state of the context decision that
+> happened before the model received memory — not an explanation
+> generated after the fact. It cannot prove what the model did with
+> the bundle, only what the pipeline decided.
+`memory_context` accepts `selection: {mode: decisive|full}` (`full`
+= admitted-full baseline for comparison); the trace records groups,
+dispositions, budget before/after, and compression.
 
 ## Project isolation
 

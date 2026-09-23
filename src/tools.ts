@@ -3,7 +3,9 @@ import type { Info as ToolInfo } from "@opencode/plugin/promise/tool";
 import type {
   ProjectMemoryClient,
   RouteRequest,
+  SelectionRequest,
   TemporalStandpointRequest,
+  TraceRequest,
   TrustRequest,
   WorkRequest,
 } from "./client";
@@ -137,6 +139,13 @@ export function MemoryContext(client: ProjectMemoryClient): ToolInfo {
           },
           additionalProperties: false,
         },
+        selection: {
+          type: "object",
+          properties: {
+            mode: { type: "string", enum: ["decisive", "full"] },
+          },
+          additionalProperties: false,
+        },
         max_chars: { type: "integer", minimum: 256, maximum: 20000 },
         max_results: { type: "integer", minimum: 1, maximum: 20 },
       },
@@ -150,6 +159,7 @@ export function MemoryContext(client: ProjectMemoryClient): ToolInfo {
         temporal?: TemporalStandpointRequest;
         work?: WorkRequest;
         trust?: TrustRequest;
+        selection?: SelectionRequest;
         max_chars?: number;
         max_results?: number;
       };
@@ -161,6 +171,7 @@ export function MemoryContext(client: ProjectMemoryClient): ToolInfo {
         args.temporal,
         args.work,
         args.trust,
+        args.selection,
       );
       return { content: JSON.stringify(result, null, 2) };
     },
@@ -221,6 +232,66 @@ export function MemoryTemporalImport(client: ProjectMemoryClient): ToolInfo {
     },
     async execute() {
       const result = await client.temporalImport();
+      return { content: JSON.stringify(result, null, 2) };
+    },
+  };
+}
+
+export function MemoryTrace(client: ProjectMemoryClient): ToolInfo {
+  return {
+    name: "memory_trace",
+    description:
+      "Inspect durable ContextTraces: exact lookup by trace_id, filtered " +
+      "search (source/chunk/route/policy/terminal stage), deterministic " +
+      "candidate explanation, integrity verification, bounded policy " +
+      "replay, and trace diff. Read-only except replay with persist.",
+    input: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["get", "find", "explain", "verify", "replay", "diff"],
+        },
+        trace_id: { type: "string" },
+        candidate_id: { type: "string" },
+        diff_with: { type: "string" },
+        replay_kind: { type: "string", enum: ["trust", "selection"] },
+        selection_mode: { type: "string", enum: ["decisive", "full"] },
+        persist: { type: "boolean" },
+        policy: { type: "object" },
+        filters: {
+          type: "object",
+          properties: {
+            source_id: { type: "string" },
+            chunk_id: { type: "string" },
+            route: { type: "string" },
+            work_type: { type: "string" },
+            policy_stage: { type: "string" },
+            policy_version: { type: "string" },
+            terminal_stage: { type: "string" },
+            before: { type: "string" },
+            after: { type: "string" },
+            limit: { type: "integer", minimum: 1, maximum: 100 },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ["mode"],
+      additionalProperties: false,
+    },
+    async execute(input) {
+      const args = input as TraceRequest & {
+        diff_with?: string;
+        selection_mode?: "decisive" | "full";
+        persist?: boolean;
+        policy?: Record<string, unknown>;
+      };
+      const result = await client.trace({
+        ...args,
+        selection_mode: args.selection_mode,
+        persist: args.persist,
+        policy: args.policy,
+      } as TraceRequest);
       return { content: JSON.stringify(result, null, 2) };
     },
   };

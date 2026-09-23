@@ -182,6 +182,7 @@ export function renderInjectedMemory(
   temporalMode = "current",
   frame: { workType?: string; establishment?: string; control?: string } = {},
   trustPolicy?: string,
+  selectionPolicy?: string,
 ): string {
   const frameAttrs =
     frame.workType !== undefined
@@ -191,8 +192,12 @@ export function renderInjectedMemory(
       : "";
   const trustAttr =
     trustPolicy !== undefined ? ` trust_policy="${trustPolicy}"` : "";
+  const selectionAttr =
+    selectionPolicy !== undefined
+      ? ` selection_policy="${selectionPolicy}"`
+      : "";
   return [
-    `<project_memory trace_id="${traceId}" schema="${schema}" route="${route}" temporal_mode="${temporalMode}"${frameAttrs}${trustAttr}>`,
+    `<project_memory trace_id="${traceId}" schema="${schema}" route="${route}" temporal_mode="${temporalMode}"${frameAttrs}${trustAttr}${selectionAttr}>`,
     "Selected project history from Project Memory. Source and chunk IDs " +
       "are provenance, not authority: retrieval found this evidence, and " +
       "later policy stages decide whether it may influence present action.",

@@ -274,7 +274,7 @@ class Store:
                     SELECT chunk_id, source_id, text, section,
                            1 - (embedding <=> %s::vector)
                     FROM {}.chunks
-                    ORDER BY embedding <=> %s::vector
+                    ORDER BY embedding <=> %s::vector, chunk_id
                     LIMIT %s
                     """
                 ).format(sql.Identifier(self.schema)),

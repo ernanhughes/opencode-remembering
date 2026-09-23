@@ -8,7 +8,8 @@ surface:
 
     doctor | setup | refresh | search | context | capture_session
     | route_eval | temporal_import | state | temporal_eval
-    | frame_eval | trust_import | trust_eval
+    | frame_eval | trust_import | trust_eval | selection_eval
+    | trace | trace_eval
 
 Retrieval finds evidence; later policy stages decide whether evidence
 may influence present action. Nothing here judges temporal validity,
@@ -559,6 +560,48 @@ def trust_health(connection, schema: str,
     return section
 
 
+def trace_health(connection, schema: str) -> dict[str, Any]:
+    """Trace section for memory_health. Zero traces is healthy."""
+    from remembering.trace import postgres as trace_pg
+    from remembering.trace.model import (
+        REPLAY_PROTOCOL_VERSION,
+        TRACE_ENGINE_VERSION,
+        TRACE_SCHEMA_VERSION,
+        TRACE_STORE_VERSION,
+    )
+
+    section: dict[str, Any] = {
+        "trace_engine_version": TRACE_ENGINE_VERSION,
+        "store_version": TRACE_STORE_VERSION,
+        "schema_version": TRACE_SCHEMA_VERSION,
+        "replay_version": REPLAY_PROTOCOL_VERSION,
+        "ready": False,
+        "trace_count": 0,
+        "oldest_trace": None,
+        "newest_trace": None,
+        "retention": "indefinite",
+    }
+    try:
+        with connection.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)",
+                        (f"{schema}.context_traces",))
+            if cur.fetchone()[0] is None:
+                return section
+        section["ready"] = True
+        counts = trace_pg.trace_count(connection, schema)
+        section["trace_count"] = counts["traces"]
+        section["oldest_trace"] = counts["oldest"]
+        section["newest_trace"] = counts["newest"]
+        stored_versions = trace_pg.versions(connection, schema)
+        if stored_versions.get("store_version"):
+            section["store_version"] = stored_versions["store_version"]
+        if stored_versions.get("schema_version"):
+            section["schema_version"] = stored_versions["schema_version"]
+    except Exception as exc:
+        section["error"] = (f"{type(exc).__name__}: {str(exc)[:160]}")
+    return section
+
+
 def load_temporal_log(connection, schema: str):
     from remembering.temporal import postgres as temporal_pg
 
@@ -676,6 +719,24 @@ def doctor(payload: dict[str, Any]) -> dict[str, Any]:
             "restricted_sources": {},
             "policy_error": None,
         },
+        "selection": {
+            "select_engine_version": "select-engine-v0.1",
+            "policy_version": "decisive-selection-v0.1",
+            "budget_version": "context-budget-v0.1",
+            "redundancy_version": "redundancy-v0.1",
+            "provenance_version": "provenance-selection-v0.1",
+        },
+        "trace": {
+            "trace_engine_version": "trace-engine-v0.1",
+            "store_version": None,
+            "schema_version": "context-trace-v0.1",
+            "replay_version": "trace-replay-v0.1",
+            "ready": False,
+            "trace_count": 0,
+            "oldest_trace": None,
+            "newest_trace": None,
+            "retention": "indefinite",
+        },
     }
 
     def fail(message: str) -> dict[str, Any]:
@@ -792,6 +853,7 @@ def doctor(payload: dict[str, Any]) -> dict[str, Any]:
                 report["frame"] = frame_health(project_dir, schema)
                 report["trust"] = trust_health(connection, schema,
                                                project_dir)
+                report["trace"] = trace_health(connection, schema)
     finally:
         connection.close()
 
@@ -1016,6 +1078,10 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
 
             standing_versions = standing_pg.initialise(
                 baseline.store.conn, schema)
+            from remembering.trace import postgres as trace_pg
+
+            trace_versions = trace_pg.initialise(
+                baseline.store.conn, schema)
             trust_check = validate_trust_config(project_dir)
             if trust_check["error"]:
                 raise BridgeError("TRUST_POLICY_INVALID",
@@ -1026,6 +1092,7 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
                     f"(embedding dim {state['dimension']}; "
                     f"{temporal_versions['store_version']}; "
                     f"{standing_versions['store_version']}; "
+                    f"{trace_versions['store_version']}; "
                     f"trust policy {trust_check['detail']})")
 
         _timed(steps, "initialise", s_initialise)
@@ -1124,8 +1191,10 @@ def do_refresh(payload: dict[str, Any]) -> dict[str, Any]:
             ensure_project_meta(baseline.store, canonical_dir)
             ensure_temporal_objects(baseline.store.conn, schema)
             from remembering.trust import postgres as standing_pg
+            from remembering.trace import postgres as trace_pg
 
             standing_pg.initialise(baseline.store.conn, schema)
+            trace_pg.initialise(baseline.store.conn, schema)
             refresh = baseline.refresh(Path(os.path.realpath(project_dir)))
             temporal = import_temporal_events(
                 baseline.store.conn, schema, project_dir)
@@ -1531,6 +1600,7 @@ def frame_context_for(schema: str, project_dir: Path,
         },
         "project_frame_version": project_frame.version,
         "project_frame_digest": loaded["digest"],
+        "project_constraints": list(project_frame.constraints),
         "preferred_classes": list(project_frame.preferences_for(
             result.work_type)) if result.work_type else [],
         "hard_exclude": project_frame.hard_exclude,
@@ -1603,8 +1673,8 @@ def load_claims_map(project_dir: Path) -> dict[str, dict]:
                 "CONFIG_INVALID",
                 f"TRUST_CLAIMS_INVALID:{source_id!r} must be an object")
         claim = {"claim_key": "", "derived_from": [], "refuted_by": [],
-                 "role": ""}
-        for field in ("claim_key", "role"):
+                 "role": "", "negative": False, "dispute": ""}
+        for field in ("claim_key", "role", "dispute"):
             value = spec.get(field, "")
             if value is not None and not isinstance(value, str):
                 raise BridgeError(
@@ -1621,6 +1691,13 @@ def load_claims_map(project_dir: Path) -> dict[str, dict]:
                     f"TRUST_CLAIMS_INVALID:{source_id!r}.{field} "
                     "must be a list of strings")
             claim[field] = [v.strip() for v in value if v.strip()]
+        negative = spec.get("negative", False)
+        if not isinstance(negative, bool):
+            raise BridgeError(
+                "CONFIG_INVALID",
+                f"TRUST_CLAIMS_INVALID:{source_id!r}.negative "
+                "must be a boolean")
+        claim["negative"] = negative
         out[source_id.strip()] = claim
     return out
 
@@ -1709,6 +1786,8 @@ def apply_trust_gate(schema: str, project_dir: Path,
     from remembering.trust.policy import match_rule
 
     candidates: list[TrustCandidate] = []
+    roles_by_id: dict[str, str] = {}
+    restricted_by_id: dict[str, list] = {}
     for chunk in ranked:
         annotation = by_annotation.get(chunk.chunk_id)
         rule, rule_id = match_rule(policy, chunk.source_id)
@@ -1722,6 +1801,9 @@ def apply_trust_gate(schema: str, project_dir: Path,
             role = rule.role
         else:
             role = "ordinary"
+        roles_by_id[chunk.chunk_id] = role or "ordinary"
+        restricted_by_id[chunk.chunk_id] = list(
+            rule.restricted_to if rule is not None else [])
         restricted = list((rule.restricted_to if rule is not None else ()))
         candidates.append(TrustCandidate(
             unit_id=chunk.chunk_id, source_id=chunk.source_id,
@@ -1772,6 +1854,9 @@ def apply_trust_gate(schema: str, project_dir: Path,
         },
         "records_by_id": {r.unit_id: r for r in records},
         "classes_by_id": classes,
+        "roles_by_id": roles_by_id,
+        "restricted_by_id": restricted_by_id,
+        "claims_map": claims,
         "admitted_ids": set(admitted),
     }
 
@@ -1780,12 +1865,389 @@ def standing_pg_known_subjects(events) -> set[str]:
     return {e.subject_id for e in events}
 
 
+# -- decisive selection ------------------------------------------------------
+#
+# Admission (Stage 5) is permission; selection is necessity. Only
+# ADMIT candidates enter influence selection; recall preserves
+# broadly. No truth claims, no scalar scores, no consensus merging.
+
+def parse_selection_spec(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("selection") or {}
+    if not isinstance(raw, dict):
+        raise BridgeError("CONFIG_INVALID", "selection must be an object")
+    mode = raw.get("mode", "decisive")
+    if mode is None:
+        mode = "decisive"
+    if not isinstance(mode, str) or mode.strip().lower() not in (
+            "decisive", "full"):
+        raise BridgeError(
+            "CONFIG_INVALID",
+            f"unknown selection mode {raw.get('mode')!r}: expected "
+            "'decisive' or 'full'.")
+    return {"mode": mode.strip().lower()}
+
+
+def constraint_hit(text: str, constraints: list) -> bool:
+    lowered = (text or "").lower()
+    for constraint in constraints:
+        if not isinstance(constraint, str):
+            continue
+        for token in constraint.lower().split():
+            if len(token) > 4 and token in lowered:
+                return True
+    return False
+
+
+def apply_selection(schema: str, project_dir: Path,
+                    ranked_selected: list, pool_items: list,
+                    by_annotation: dict, trust_records: dict,
+                    trust_classes: dict, trust_roles: dict,
+                    framed_by_id: dict, frame_control: str,
+                    route_value: str, selection_spec: dict,
+                    enforce_trust: bool, constraints: list,
+                    claims_map: dict, max_chars: int,
+                    max_results: int,
+                    retrieval_paths: dict) -> dict[str, Any]:
+    """Run decisive selection over admitted candidates. Returns
+    ordered chunks, records, and the trace block."""
+    import time as _time
+
+    from remembering.select.model import (
+        BUDGET_POLICY_VERSION,
+        PROVENANCE_POLICY_VERSION,
+        REDUNDANCY_POLICY_VERSION,
+        SELECT_ENGINE_VERSION,
+        SELECTION_POLICY_VERSION,
+        SelectionCandidate,
+    )
+    from remembering.select.policy import select
+
+    started = _time.perf_counter()
+    pool_by_id = {c["chunk_id"]: c for c in pool_items}
+    query_ids = set((retrieval_paths.get("query") or {}).get("ids", []))
+    objective_ids = set(
+        ((retrieval_paths.get("objective") or {}) or {}).get("ids", []))
+    derived_map = {source: list(spec.get("derived_from", []))
+                   for source, spec in claims_map.items()}
+
+    selection_candidates: list[SelectionCandidate] = []
+    for chunk in ranked_selected:
+        item = pool_by_id.get(chunk.chunk_id, {})
+        annotation = by_annotation.get(chunk.chunk_id)
+        record = trust_records.get(chunk.chunk_id)
+        if enforce_trust and (
+                record is None or record.to_dict()["verdict"] != "admit"):
+            raise BridgeError(
+                "SELECT_PIPELINE_INVARIANT",
+                f"non-ADMIT candidate {chunk.chunk_id} entered selection")
+        framed = framed_by_id.get(chunk.chunk_id)
+        claim = claims_map.get(chunk.source_id, {})
+        selection_candidates.append(SelectionCandidate(
+            chunk_id=chunk.chunk_id, source_id=chunk.source_id,
+            text=item.get("text", chunk.text),
+            fused_rank=item.get("rank", chunk.rank),
+            lexical_rank=item.get("lexical_rank"),
+            dense_rank=item.get("dense_rank"),
+            score=float(item.get("score", chunk.score) or 0.0),
+            from_query=chunk.chunk_id in query_ids,
+            from_objective=chunk.chunk_id in objective_ids,
+            temporal_status=(annotation.status if annotation
+                             else "not_modelled"),
+            frame_control=frame_control,
+            evidence_class=(framed.evidence_class if framed is not None
+                            else "prose"),
+            frame_preferred=bool(framed and framed.preferred),
+            trust_reason=(record.to_dict()["reason"] if record else ""),
+            source_class=trust_classes.get(chunk.chunk_id,
+                                           "informational"),
+            role=trust_roles.get(chunk.chunk_id, "ordinary"),
+            claim_key=claim.get("claim_key", ""),
+            derived_from=tuple(claim.get("derived_from", [])),
+            dispute_key=claim.get("dispute", ""),
+            negative=bool(claim.get("negative", False)),
+            constraint_hit=constraint_hit(
+                item.get("text", chunk.text), constraints)))
+
+    if route_value == "recall":
+        mode = "preserving"
+    elif selection_spec["mode"] == "full":
+        mode = "full"
+    else:
+        mode = "decisive"
+    try:
+        result = select(selection_candidates, derived_map,
+                        max_chars=max_chars, max_results=max_results,
+                        mode=mode)
+    except ValueError as exc:
+        raise BridgeError("SELECT_PROVENANCE_INVARIANT", str(exc))
+    latency_ms = round((_time.perf_counter() - started) * 1000, 2)
+    records_by_id = {r.chunk_id: r for r in
+                     (*result.selected, *result.dropped)}
+    ordered = [next(c for c in selection_candidates
+                    if c.chunk_id == r.chunk_id)
+               for r in result.selected]
+    chars_before = sum(len(c.text) for c in selection_candidates)
+    chars_after = sum(len(c.text) for c in ordered)
+    block = {
+        "mode": ("preserving" if route_value == "recall"
+                 else selection_spec["mode"]),
+        "policy_version": SELECTION_POLICY_VERSION,
+        "budget_version": BUDGET_POLICY_VERSION,
+        "redundancy_version": REDUNDANCY_POLICY_VERSION,
+        "provenance_version": PROVENANCE_POLICY_VERSION,
+        "select_engine_version": SELECT_ENGINE_VERSION,
+        "input_count": len(selection_candidates),
+        "selected_count": len(ordered),
+        "dropped_redundant": sum(
+            1 for r in result.dropped
+            if r.disposition.value == "drop_redundant"),
+        "dropped_low_value": sum(
+            1 for r in result.dropped
+            if r.disposition.value == "drop_low_value"),
+        "dropped_budget": sum(
+            1 for r in result.dropped
+            if r.disposition.value == "drop_budget"),
+        "chars_before": chars_before,
+        "chars_after": chars_after,
+        "compression_ratio": (round(chars_after / chars_before, 3)
+                              if chars_before else 1.0),
+        "budget_insufficient": result.budget_insufficient,
+        "groups": result.groups,
+        "records": [r.to_dict() for r in (*result.selected,
+                                          *result.dropped)],
+        "selected_ids": [r.chunk_id for r in result.selected],
+        "latency_ms": latency_ms,
+    }
+    return {"ordered": ordered, "records_by_id": records_by_id,
+            "block": block}
+
+
+# -- durable context traces -----------------------------------------------------
+#
+# Stage 7 observes the pipeline; it makes no policy. Every successful
+# context construction builds an immutable content-addressed
+# ContextTrace, persists it before the bundle is returned, and hands
+# the caller its trace_id. Influence requires persistence to succeed;
+# recall degrades to an unpersisted trace rather than failing.
+
+def build_durable_trace(schema: str, canonical_dir: str, now: str,
+                        payload: dict, route_block: dict,
+                        standpoint_echo: dict, work_spec: dict,
+                        trust_spec: dict, selection_spec: dict,
+                        retrieval_trace: dict, temporal_block: dict,
+                        frame_trace: dict, trust_block: dict,
+                        selection_block: dict, lifecycles: list,
+                        pool_entries: list, content: str,
+                        admitted: list, timings: dict,
+                        versions: dict) -> dict:
+    from remembering.trace.canonical import (
+        bundle_digest_for,
+        input_digest_for,
+        pool_digest_for,
+    )
+    from remembering.trace.lifecycle import funnel
+    from remembering.trace.model import TRACE_SCHEMA_VERSION
+
+    import hashlib as _hashlib
+
+    query = payload.get("query", "")
+    request = {
+        "query": query if isinstance(query, str) else "",
+        "max_chars": payload.get("max_chars", 4000),
+        "max_results": payload.get("max_results", 6),
+        "route_requested": payload.get("route", "auto"),
+        "temporal_requested": payload.get("temporal") or {},
+        "work_requested": {
+            k: work_spec.get(k) for k in
+            ("mode", "explicit", "prior_work_type")},
+        "trust_requested": trust_spec,
+        "selection_requested": selection_spec,
+    }
+    semantic = {
+        "schema_version": TRACE_SCHEMA_VERSION,
+        "project": {
+            "project_id": schema,
+            "project_digest": _hashlib.sha256(
+                canonical_dir.encode("utf-8")).hexdigest()[:16],
+        },
+        "created_at": now,
+        "request": request,
+        "route": route_block,
+        "versions": versions,
+        "stages": {
+            "retrieval": retrieval_trace,
+            "temporal": temporal_block,
+            "frame": frame_trace,
+            "trust": trust_block,
+            "selection": selection_block,
+        },
+        "candidates": lifecycles,
+        "candidate_pool": {
+            "entries": sorted(
+                pool_entries,
+                key=lambda entry: entry.get("chunk_id", "")),
+            "candidate_pool_digest": pool_digest_for(sorted(
+                pool_entries,
+                key=lambda entry: entry.get("chunk_id", ""))),
+        },
+        "bundle": {
+            "content": content,
+            "chars": len(content),
+            "render_order": [i["chunk_id"] for i in admitted],
+            "bundle_digest": bundle_digest_for(content),
+        },
+        "funnel": funnel(lifecycles),
+        "timings": timings,
+        "input_digest": input_digest_for({
+            "query": request["query"],
+            "route": route_block.get("route"),
+            "temporal": standpoint_echo,
+            "work_mode": work_spec.get("mode"),
+            "trust_level": trust_spec.get("level"),
+            "selection_mode": selection_spec.get("mode"),
+            "max_chars": request["max_chars"],
+            "max_results": request["max_results"],
+            "policy_versions": versions,
+        }),
+    }
+    return semantic
+
+
+def collect_versions(ret: dict, emb: dict, versions: dict,
+                     frame_trace: dict, trust_block: dict,
+                     selection_block: dict) -> dict:
+    from remembering import ENGINE_VERSION
+    from remembering.baseline.routing import ROUTING_POLICY_VERSION
+    from remembering.frame.model import (
+        ESTABLISHMENT_POLICY_VERSION,
+        FRAME_CONTROL_POLICY_VERSION,
+        FRAMING_ENGINE_VERSION,
+    )
+    from remembering.select.model import (
+        BUDGET_POLICY_VERSION,
+        PROVENANCE_POLICY_VERSION,
+        REDUNDANCY_POLICY_VERSION,
+        SELECT_ENGINE_VERSION,
+        SELECTION_POLICY_VERSION,
+    )
+    from remembering.trace.model import (
+        CANONICAL_FORMAT_VERSION,
+        LIFECYCLE_SCHEMA_VERSION,
+        REPLAY_PROTOCOL_VERSION,
+        TRACE_ENGINE_VERSION,
+        TRACE_SCHEMA_VERSION,
+        TRACE_STORE_VERSION,
+    )
+    from remembering.trust.model import (
+        INSTRUCTION_SCREEN_VERSION,
+        STANDING_RESOLVER_VERSION,
+        TRUST_ENGINE_VERSION,
+        TRUST_POLICY_VERSION,
+    )
+    return {
+        "engine_version": ENGINE_VERSION,
+        "retrieval": {"mode": ret.get("mode"),
+                      "embedding": emb.get("model", ""),
+                      "embedding_version": emb.get("version", "")},
+        "routing_policy_version": ROUTING_POLICY_VERSION,
+        "temporal": {
+            "store_version": versions.get("store_version"),
+            "event_schema_version": versions.get(
+                "event_schema_version"),
+            "reducer_version": versions.get("reducer_version"),
+        },
+        "frame": {
+            "framing_engine_version": FRAMING_ENGINE_VERSION,
+            "establishment_policy": ESTABLISHMENT_POLICY_VERSION,
+            "control_policy": FRAME_CONTROL_POLICY_VERSION,
+            "project_frame_version": frame_trace.get(
+                "project_frame_version"),
+            "project_frame_digest": frame_trace.get(
+                "project_frame_digest"),
+        },
+        "trust": {
+            "trust_engine_version": TRUST_ENGINE_VERSION,
+            "trust_policy_version": TRUST_POLICY_VERSION,
+            "policy_version": trust_block.get("policy_version"),
+            "policy_digest": trust_block.get("policy_digest"),
+            "policy_source": trust_block.get("policy_source"),
+            "instruction_screen_version":
+                INSTRUCTION_SCREEN_VERSION,
+            "standing_resolver_version": STANDING_RESOLVER_VERSION,
+        },
+        "selection": {
+            "select_engine_version": SELECT_ENGINE_VERSION,
+            "policy_version": selection_block.get("policy_version"),
+            "budget_version": BUDGET_POLICY_VERSION,
+            "redundancy_version": REDUNDANCY_POLICY_VERSION,
+            "provenance_version": PROVENANCE_POLICY_VERSION,
+        },
+        "trace": {
+            "trace_engine_version": TRACE_ENGINE_VERSION,
+            "schema_version": TRACE_SCHEMA_VERSION,
+            "store_version": TRACE_STORE_VERSION,
+            "canonical_format": CANONICAL_FORMAT_VERSION,
+            "lifecycle_version": LIFECYCLE_SCHEMA_VERSION,
+            "replay_protocol": REPLAY_PROTOCOL_VERSION,
+        },
+    }
+
+
+def persist_durable_trace(connection, schema: str, semantic: dict,
+                          bundle_content: str,
+                          pool_entries: list) -> dict:
+    """Persist one trace atomically. Returns ids + persisted flag."""
+    import datetime
+
+    from remembering.trace import postgres as trace_pg
+
+    trace_pg.initialise(connection, schema)
+    created_at = semantic.get("created_at") or datetime.datetime.now(
+        datetime.timezone.utc).isoformat()
+    lifecycles = semantic.get("candidates", [])
+    policies = _policy_rows(semantic)
+    return trace_pg.insert_trace(
+        connection, schema, semantic, bundle_content, pool_entries,
+        created_at, lifecycles, policies)
+
+
+def _policy_rows(semantic: dict) -> list[dict]:
+    versions = semantic.get("versions", {})
+    rows: list[dict] = []
+
+    def add(stage: str, name: str, version, digest) -> None:
+        rows.append({"stage": stage, "policy_name": name,
+                     "version": str(version or "unknown"),
+                     "digest": str(digest or version or "unknown")})
+
+    retrieval = versions.get("retrieval", {})
+    add("retrieval", "retrieval",
+        retrieval.get("embedding_version"), retrieval.get("mode"))
+    add("routing", "routing",
+        versions.get("routing_policy_version"), None)
+    temporal = versions.get("temporal", {})
+    add("temporal", "reducer", temporal.get("reducer_version"), None)
+    frame = versions.get("frame", {})
+    add("frame", "project_frame", frame.get("project_frame_version"),
+        frame.get("project_frame_digest"))
+    add("frame", "establishment", frame.get("establishment_policy"), None)
+    add("frame", "control", frame.get("control_policy"), None)
+    trust = versions.get("trust", {})
+    add("trust", "trust_policy", trust.get("policy_version"),
+        trust.get("policy_digest"))
+    add("trust", "instruction_screen",
+        trust.get("instruction_screen_version"), None)
+    selection = versions.get("selection", {})
+    add("selection", "selection", selection.get("policy_version"), None)
+    add("selection", "budget", selection.get("budget_version"), None)
+    return rows
+
+
 def do_context(payload: dict[str, Any]) -> dict[str, Any]:
     require_engine()
-    from remembering.baseline.config import ContextConfig
-    from remembering.baseline.context import assemble
     from remembering.baseline.routing import guidance_for, route_for_request
 
+    pipeline_started = time.perf_counter()
     schema = schema_from(payload)
     max_chars = payload.get("max_chars", 4000)
     max_results = payload.get("max_results", 6)
@@ -1798,13 +2260,14 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         raise BridgeError("CONFIG_INVALID",
                           "max_results must be a positive integer")
     requested = route_requested(payload)
-
     query = payload.get("query", "")
+    route_started = time.perf_counter()
     try:
         decision = route_for_request(
             query if isinstance(query, str) else "", requested)
     except ValueError as exc:
         raise BridgeError("CONFIG_INVALID", str(exc))
+    route_ms = round((time.perf_counter() - route_started) * 1000, 2)
     route_block = decision.to_dict()
     guidance = guidance_for(decision.route)
 
@@ -2023,9 +2486,31 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         ranked_selected = [c for c in ranked_selected
                            if c.chunk_id in admitted_trust]
     trace_trust_latency = trust_block["latency_ms"]
-    bundle = assemble(ranked_selected,
-                      ContextConfig(max_chars=max_chars,
-                                    max_passages=max_results))
+
+    # Decisive selection: admission is permission, selection is
+    # necessity. The render loop below enforces the byte budget over
+    # the selected order; truncation is flagged, never silent.
+    selection_spec = parse_selection_spec(payload)
+    framed_by_id = {c.chunk_id: c for c in kept}
+    selection_out = apply_selection(
+        schema, project_dir, ranked_selected, pool_items, by_annotation,
+        trust_records, trust_classes, trust_out["roles_by_id"],
+        framed_by_id,
+        frame_control=(frame_block.get("control", "query_only")
+                       if frame_applied else "query_only"),
+        route_value=decision.route.value, selection_spec=selection_spec,
+        enforce_trust=enforce_trust,
+        constraints=(frame_block.get("project_constraints", [])
+                     if frame_applied else []),
+        claims_map=trust_out["claims_map"],
+        max_chars=max_chars, max_results=max_results,
+        retrieval_paths=retrieval_paths)
+    selection_block = selection_out["block"]
+    selection_records = selection_out["records_by_id"]
+    ordered_chunks = selection_out["ordered"]
+    ordered_ids = [c.chunk_id for c in ordered_chunks]
+    bundle_dropped_duplicates = selection_block["dropped_redundant"]
+    bundle_dropped_over_budget = selection_block["dropped_budget"]
     # Route guidance is bundle metadata, but it still counts toward the
     # byte budget: the bundle as a whole stays bounded.
     guidance_prefix = guidance + "\n\n---\n\n"
@@ -2033,10 +2518,11 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
     parts: list[str] = []
     admitted: list[dict[str, Any]] = []
     by_id = {c["chunk_id"]: c for c in pool_items}
-    framed_by_id = {c.chunk_id: c for c in kept}
     chars = 0
     if evidence_budget > 0:
-        for chunk in bundle.admitted:
+        for candidate in ordered_chunks:
+            chunk = next(c for c in ranked_selected
+                         if c.chunk_id == candidate.chunk_id)
             item = by_id.get(chunk.chunk_id, {
                 "chunk_id": chunk.chunk_id, "source_id": chunk.source_id,
                 "section": chunk.section, "rank": chunk.rank,
@@ -2075,9 +2561,12 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
             room = evidence_budget - chars - len(separator) - len(header)
             if room < 0:
                 break
+            truncated = False
+            original_chars = len(text)
             if len(text) > room:
                 marker = "\n[…truncated to fit the context budget…]"
                 text = text[:max(0, room - len(marker))] + marker
+                truncated = True
             piece = separator + header + text
             parts.append(piece)
             chars += len(piece)
@@ -2086,6 +2575,12 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
                 admitted_item["temporal"] = annotation.to_dict()
             if trust_record is not None:
                 admitted_item["trust"] = trust_record.to_dict()
+            selection_record = selection_records.get(chunk.chunk_id)
+            if selection_record is not None:
+                selection_record.truncated = truncated
+                selection_record.original_chars = original_chars
+                selection_record.chars = len(text)
+                admitted_item["selection"] = selection_record.to_dict()
             admitted.append(admitted_item)
             if chars >= evidence_budget:
                 break
@@ -2098,8 +2593,8 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         "suppressed": [s.to_dict() for s in suppressed],
         "annotations": [a.to_dict() for a in annotated],
         "selected_ids": [i["chunk_id"] for i in admitted],
-        "dropped_duplicates": bundle.dropped_duplicates,
-        "dropped_over_budget": bundle.dropped_over_budget,
+        "dropped_duplicates": bundle_dropped_duplicates,
+        "dropped_over_budget": bundle_dropped_over_budget,
         "incomplete_history": any(a.incomplete_history
                                   for a in annotated),
         "store_version": versions.get("store_version"),
@@ -2112,28 +2607,143 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
     frame_trace["latency_ms"] = frame_latency_ms
     frame_trace["retrieval_paths"] = retrieval_paths
     trace = {**trace, "temporal": temporal_block, "frame": frame_trace,
-             "trust": trust_block}
+             "trust": trust_block, "selection": selection_block}
 
-    trace_material = json.dumps(
-        {"schema": result["schema"], "query": payload.get("query", ""),
-         "mode": result["trace"]["mode"],
-         "route": route_block["route"],
-         "route_source": route_block["route_source"],
-         "temporal_mode": standpoint.mode,
-         "valid_at": standpoint.valid_at,
-         "known_at": standpoint.known_at,
-         "frame_control": frame_trace.get("control"),
-         "project_frame_version": frame_trace.get("project_frame_version"),
-         "trust_policy_version": trust_block.get("policy_version"),
-         "trust_policy_digest": trust_block.get("policy_digest"),
-         "embedding": result["trace"]["embedding"]["version"],
-         "chunks": [item["chunk_id"] for item in admitted]},
-        sort_keys=True,
+    # Durable ContextTrace: build the immutable record, persist it,
+    # then hand the caller its content-addressed ID. Influence
+    # requires persistence; recall degrades to an unpersisted trace.
+    from remembering.trace.canonical import (
+        bundle_digest_for,
+        content_hash,
     )
-    trace_id = "hybrid:" + hashlib.sha256(
-        trace_material.encode("utf-8")).hexdigest()[:16]
+    from remembering.trace.lifecycle import build_lifecycles, funnel
+
+    trace_started = time.perf_counter()
+    retrieval_index: dict[str, dict] = {}
+    lexical_ids = set(result["trace"].get("lexical_ids", []))
+    dense_ids = set(result["trace"].get("dense_ids", []))
+    fused_ids = result["trace"].get("fused_ids", [])
+    fused_rank = {cid: i + 1 for i, cid in enumerate(fused_ids)}
+    objective_ids = set(
+        ((retrieval_paths.get("objective") or {}) or {}).get("ids", []))
+    for item in pool_items:
+        paths = []
+        if item["chunk_id"] in lexical_ids:
+            paths.append("lexical")
+        if item["chunk_id"] in dense_ids:
+            paths.append("dense")
+        if item["chunk_id"] in objective_ids:
+            paths.append("objective")
+        retrieval_index[item["chunk_id"]] = {
+            "lexical_rank": item.get("lexical_rank"),
+            "dense_rank": item.get("dense_rank"),
+            "fused_rank": fused_rank.get(item["chunk_id"]),
+            "paths": paths,
+            "score": item.get("score"),
+        }
+    temporal_selected_ids = {s.chunk_id for s in selected}
+    frame_kept_ids = {c.chunk_id for c in kept} if frame_applied else None
+    rendered_ids = [i["chunk_id"] for i in admitted]
+    trust_inputs: dict[str, dict] = {}
+    for item in pool_items:
+        claim = (trust_out["claims_map"] or {}).get(item["source_id"], {})
+        trust_inputs[item["chunk_id"]] = {
+            "source_class": trust_classes.get(item["chunk_id"],
+                                              "informational"),
+            "role": trust_out["roles_by_id"].get(item["chunk_id"],
+                                                 "ordinary"),
+            "claim_key": claim.get("claim_key", ""),
+            "derived_from": claim.get("derived_from", []),
+            "refuted_by": claim.get("refuted_by", []),
+            "restricted_to": trust_out.get("restricted_by_id", {}).get(
+                item["chunk_id"], []),
+        }
+    lifecycles = build_lifecycles(
+        pool_items, temporal_selected_ids, by_annotation, frame_kept_ids,
+        frame_applied, trust_records, enforce_trust, selection_records,
+        rendered_ids, retrieval_index, trust_inputs)
+    pool_entries = [
+        {"chunk_id": c["chunk_id"],
+         "content_hash": content_hash(c.get("text", ""))}
+        for c in pool_items]
+    emb_spec = embedding_spec_from(payload)
+    ret_spec = retrieval_spec_from(payload)
+    version_block = collect_versions(
+        ret_spec,
+        {"model": emb_spec.get("model", ""),
+         "version": result["trace"]["embedding"]["version"]},
+        versions, frame_trace, trust_block, selection_block)
+    timings = {
+        "route_ms": route_ms,
+        "retrieval_ms": result["trace"]["latencies_ms"],
+        "temporal_ms": temporal_ms,
+        "frame_ms": frame_latency_ms,
+        "trust_ms": trust_block.get("latency_ms"),
+        "selection_ms": selection_block.get("latency_ms"),
+    }
+    semantic = build_durable_trace(
+        schema, canonical_dir, now, payload, route_block, standpoint_echo,
+        work_spec, trust_spec, selection_spec, result["trace"],
+        temporal_block, frame_trace, trust_block, selection_block,
+        lifecycles, pool_entries,
+        "", admitted, timings, version_block)
     evidence = "\n\n---\n\n".join(parts)
     content = guidance + "\n\n---\n\n" + evidence if evidence else guidance
+    # Bundle content is fixed before persistence so the stored digest
+    # covers exactly what the caller receives.
+    semantic["bundle"] = {
+        "content": content,
+        "chars": len(content),
+        "render_order": [i["chunk_id"] for i in admitted],
+        "bundle_digest": bundle_digest_for(content),
+    }
+    semantic["funnel"] = funnel(lifecycles)
+    from remembering.trace.postgres import compute_ids as _compute_ids
+
+    pre_ids = _compute_ids(semantic, content, pool_entries)
+    persist_started = time.perf_counter()
+    connection = raw_connect()
+    try:
+        persist_out = persist_durable_trace(
+            connection, schema, semantic, content, pool_entries)
+    except ValueError as exc:
+        connection.close()
+        raise BridgeError("TRACE_STORE_ERROR", str(exc))
+    except Exception as exc:
+        connection.close()
+        if enforce_trust:
+            raise BridgeError(
+                "TRACE_PERSIST_FAILED",
+                f"durable trace persistence failed: "
+                f"{type(exc).__name__}: {str(exc)[:160]}; refusing to "
+                "inject unaudited influential memory")
+        trace_persisted = False
+        persist_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+        persist_out = {"trace_id": pre_ids["trace_id"], **pre_ids}
+    else:
+        connection.close()
+        trace_persisted = True
+        persist_error = None
+    timings["trace_construction_ms"] = round(
+        (time.perf_counter() - trace_started) * 1000, 2)
+    timings["trace_persistence_ms"] = round(
+        (time.perf_counter() - persist_started) * 1000, 2)
+    timings["total_context_ms"] = round(
+        (time.perf_counter() - pipeline_started) * 1000, 2)
+    semantic["timings"] = timings
+    trace_id = persist_out["trace_id"]
+    trace = {**trace, "durable_trace_id": trace_id,
+             "trace_persisted": trace_persisted,
+             "timings": timings,
+             "candidates": lifecycles,
+             "funnel": semantic["funnel"],
+             "bundle": semantic["bundle"],
+             "bundle_digest": persist_out["bundle_digest"],
+             "candidate_pool_digest": persist_out[
+                 "candidate_pool_digest"],
+             "input_digest": persist_out["input_digest"]}
+    if persist_error is not None:
+        trace["persist_error"] = persist_error
     denied_n = len(trust_block.get("denied_ids", []))
     quarantined_n = len(trust_block.get("quarantined_ids", []))
     trust_note = ""
@@ -2146,6 +2756,7 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         "items": admitted, "trace": trace,
         "trace_id": trace_id, "content": content,
         "chars": len(content), "route": route_block,
+        "trace_persisted": trace_persisted,
         "temporal": {
             "mode": standpoint.mode,
             "valid_at": standpoint.valid_at,
@@ -2163,6 +2774,20 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
             "admitted": len(trust_block.get("admitted_ids", [])),
             "denied": denied_n,
             "quarantined": quarantined_n,
+        },
+        "selection": {
+            "policy_version": selection_block.get("policy_version"),
+            "input_count": selection_block.get("input_count"),
+            "selected_count": selection_block.get("selected_count"),
+            "dropped_redundant": selection_block.get("dropped_redundant"),
+            "dropped_low_value": selection_block.get(
+                "dropped_low_value", 0),
+            "dropped_budget": selection_block.get("dropped_budget"),
+            "chars_before": selection_block.get("chars_before"),
+            "chars_after": selection_block.get("chars_after"),
+            "compression_ratio": selection_block.get("compression_ratio"),
+            "budget_insufficient": selection_block.get(
+                "budget_insufficient"),
         },
         "admission_note": admission_note_for(
             decision.route, suppressed=len(suppressed)) + trust_note,
@@ -2378,6 +3003,473 @@ def do_trust_eval(payload: dict[str, Any]) -> dict[str, Any]:
             "ladder": ladder}
 
 
+def do_selection_eval(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic Stage 6 selection contract (no services)."""
+    _ = payload
+    require_engine()
+    from remembering.select.evaluation import evaluate_selection
+
+    report = evaluate_selection()
+    return {"ok": bool(report["passed"]), **report}
+
+
+def do_trace_eval(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic Stage 7 trace contract (no services)."""
+    _ = payload
+    require_engine()
+    from remembering.trace.evaluation import evaluate_trace
+
+    report = evaluate_trace()
+    return {"ok": bool(report["passed"]), **report}
+
+
+def _trace_connection(schema: str, canonical_dir: str):
+    connection = raw_connect()
+    try:
+        with connection.cursor() as cur:
+            from psycopg import sql
+
+            cur.execute("SELECT to_regclass(%s)",
+                        (f"{schema}.context_traces",))
+            if cur.fetchone()[0] is None:
+                connection.close()
+                raise BridgeError(
+                    "TRACE_STORE_MISSING",
+                    "trace storage is not initialised; run memory_setup.")
+            cur.execute(
+                sql.SQL("SELECT value FROM {}.meta "
+                        "WHERE key = 'project.path'").format(
+                    sql.Identifier(schema)))
+            row = cur.fetchone()
+            if row is not None and row[0] != canonical_dir:
+                connection.close()
+                raise BridgeError(
+                    "TRACE_PROJECT_MISMATCH",
+                    f"schema {schema!r} is claimed by project {row[0]!r}.")
+    except BridgeError:
+        raise
+    except Exception as exc:
+        connection.close()
+        raise BridgeError("TRACE_STORE_ERROR", str(exc))
+    return connection
+
+
+def do_trace(payload: dict[str, Any]) -> dict[str, Any]:
+    """memory_trace: get | find | explain | verify | replay | diff."""
+    require_engine()
+    from remembering.trace import postgres as trace_pg
+    from remembering.trace.query import (
+        explain_candidate,
+        find_traces,
+        summarize,
+    )
+    from remembering.trace.replay import (
+        diff_traces,
+        integrity_replay,
+        reconstruct_bundle,
+    )
+
+    schema = schema_from(payload)
+    project_dir = project_directory_from(payload)
+    canonical_dir = canonical_project_dir(project_dir)
+    mode = payload.get("mode", "get")
+    if not isinstance(mode, str) or mode.strip().lower() not in (
+            "get", "find", "explain", "verify", "replay", "diff"):
+        raise BridgeError(
+            "CONFIG_INVALID",
+            f"unknown trace mode {payload.get('mode')!r}: expected 'get', "
+            "'find', 'explain', 'verify', 'replay' or 'diff'.")
+    mode = mode.strip().lower()
+
+    connection = _trace_connection(schema, canonical_dir)
+    try:
+        if mode == "get":
+            trace_id = payload.get("trace_id")
+            if not isinstance(trace_id, str) or not trace_id.strip():
+                raise BridgeError("CONFIG_INVALID",
+                                  "mode 'get' requires trace_id")
+            stored = trace_pg.fetch_trace(connection, schema,
+                                          trace_id.strip())
+            if stored is None:
+                return {"ok": False, "schema": schema,
+                        "message": "TRACE_NOT_FOUND",
+                        "trace": None}
+            return {"ok": True, "schema": schema,
+                    "trace_id": trace_id.strip(), "trace": stored,
+                    "summary": summarize(stored)}
+        if mode == "find":
+            filters = payload.get("filters") or {}
+            if not isinstance(filters, dict):
+                raise BridgeError("CONFIG_INVALID",
+                                  "filters must be an object")
+            try:
+                summaries = find_traces(connection, schema, filters)
+            except ValueError as exc:
+                raise BridgeError("CONFIG_INVALID", str(exc))
+            return {"ok": True, "schema": schema, "count": len(summaries),
+                    "traces": summaries}
+        if mode == "explain":
+            trace_id = payload.get("trace_id")
+            candidate_id = payload.get("candidate_id")
+            if not isinstance(trace_id, str) or not trace_id.strip():
+                raise BridgeError("CONFIG_INVALID",
+                                  "mode 'explain' requires trace_id")
+            if not isinstance(candidate_id, str) or not candidate_id.strip():
+                raise BridgeError("CONFIG_INVALID",
+                                  "mode 'explain' requires candidate_id")
+            stored = trace_pg.fetch_trace(connection, schema,
+                                          trace_id.strip())
+            if stored is None:
+                return {"ok": False, "schema": schema,
+                        "message": "TRACE_NOT_FOUND", "explanation": None}
+            return {"ok": True, "schema": schema,
+                    "explanation": explain_candidate(
+                        stored, candidate_id.strip())}
+        if mode == "verify":
+            trace_id = payload.get("trace_id")
+            if not isinstance(trace_id, str) or not trace_id.strip():
+                raise BridgeError("CONFIG_INVALID",
+                                  "mode 'verify' requires trace_id")
+            stored = trace_pg.fetch_trace(connection, schema,
+                                          trace_id.strip())
+            if stored is None:
+                return {"ok": False, "schema": schema,
+                        "message": "TRACE_NOT_FOUND",
+                        "verification": None}
+            verification = integrity_replay(stored)
+            rebuilt = reconstruct_bundle(stored)
+            verification["reconstruction_matches"] = rebuilt["matches"]
+            return {"ok": verification["ok"], "schema": schema,
+                    "verification": verification}
+        if mode == "replay":
+            return _do_trace_replay(connection, schema, payload)
+        result = _do_trace_diff(connection, schema, payload)
+        return result
+    finally:
+        connection.close()
+
+
+def _replay_policy(payload: dict, stored: dict) -> dict:
+    """Resolve the replay trust policy: inline dict or 'current' file."""
+    from remembering.trust.policy import (
+        builtin_policy,
+        load_trust_policy,
+        validate_policy_dict,
+    )
+
+    spec = payload.get("policy")
+    if spec is None or (isinstance(spec, str)
+                        and spec.strip().lower() == "current"):
+        return {"policy": None, "identity": {"source": "current-file"},
+                "use_current_file": True}
+    if not isinstance(spec, dict):
+        raise BridgeError("CONFIG_INVALID",
+                          "replay policy must be an object or 'current'")
+    try:
+        policy = validate_policy_dict(spec)
+    except Exception as exc:
+        raise BridgeError("CONFIG_INVALID", f"replay policy invalid: {exc}")
+    _ = stored
+    return {"policy": policy,
+            "identity": {"version": policy.version,
+                         "digest": policy.digest,
+                         "source": "inline"},
+            "use_current_file": False}
+
+
+def _do_trace_replay(connection, schema: str,
+                     payload: dict[str, Any]) -> dict[str, Any]:
+    from remembering.trace import postgres as trace_pg
+    from remembering.trace.replay import (
+        counterfactual_id,
+        diff_traces,
+        reconstruct_bundle,
+    )
+    from remembering.trust.gate import TrustContext, judge_all
+    from remembering.trust.model import TrustCandidate
+    from remembering.trust.policy import load_trust_policy
+    from remembering.select.model import SelectionCandidate
+    from remembering.select.policy import select as select_policy
+
+    trace_id = payload.get("trace_id")
+    if not isinstance(trace_id, str) or not trace_id.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "mode 'replay' requires trace_id")
+    kind = payload.get("replay_kind", "trust")
+    if not isinstance(kind, str) or kind.strip().lower() not in (
+            "trust", "selection"):
+        raise BridgeError(
+            "CONFIG_INVALID",
+            f"unknown replay_kind {payload.get('replay_kind')!r}: "
+            "expected 'trust' or 'selection'.")
+    kind = kind.strip().lower()
+    stored = trace_pg.fetch_trace(connection, schema, trace_id.strip())
+    if stored is None:
+        return {"ok": False, "schema": schema, "message": "TRACE_NOT_FOUND",
+                "replay": None}
+
+    frozen = ["retrieval: frozen from source trace",
+              "temporal: frozen", "frame: frozen"]
+    if kind == "trust":
+        replayed = _replay_trust(
+            connection, schema, stored, payload, frozen)
+    else:
+        replayed = _replay_selection(stored, payload, frozen)
+    if not replayed["ok"]:
+        return {"ok": False, "schema": schema,
+                "message": replayed["message"], "replay": None}
+    diff = diff_traces(stored, replayed["pseudo_trace"])
+    result = {
+        "source_trace_id": trace_id.strip(),
+        "replay_kind": kind,
+        "evidence_boundary": frozen + replayed["boundary"],
+        "verdicts": replayed["verdicts"],
+        "selected_ids": replayed["selected_ids"],
+        "bundle_digest": replayed["bundle_digest"],
+        "diff": diff,
+        "replay_id": counterfactual_id(
+            stored.get("trace_id"), kind, replayed["policy_identity"],
+            replayed["bundle_digest"]),
+        "persisted": False,
+    }
+    if payload.get("persist") is True:
+        pseudo = dict(replayed["pseudo_trace"])
+        pseudo["execution_type"] = "counterfactual_replay"
+        pseudo["source_trace_id"] = stored.get("trace_id")
+        pseudo["replay_kind"] = kind
+        try:
+            from remembering.trace.postgres import insert_trace
+            from remembering.trace.canonical import (
+                bundle_digest_for,
+                pool_digest_for,
+            )
+            entries = pseudo.get("candidate_pool", {}).get("entries", [])
+            out = insert_trace(
+                connection, schema, pseudo,
+                pseudo.get("bundle", {}).get("content", ""), entries,
+                pseudo.get("created_at", stored.get("created_at", "")),
+                pseudo.get("candidates", []),
+                [{"stage": "replay", "policy_name": kind,
+                  "version": str(replayed["policy_identity"]),
+                  "digest": str(replayed["policy_identity"])}])
+            result["persisted"] = True
+            result["replay_trace_id"] = out["trace_id"]
+        except ValueError as exc:
+            raise BridgeError("TRACE_STORE_ERROR", str(exc))
+    return {"ok": True, "schema": schema, "replay": result}
+
+
+def _replay_trust(connection, schema: str, stored: dict,
+                  payload: dict, frozen: list) -> dict:
+    from remembering.trust.gate import TrustContext, judge_all
+    from remembering.trust.model import TrustCandidate
+    from remembering.trust.policy import load_trust_policy
+
+    resolved = _replay_policy(payload, stored)
+    if resolved["use_current_file"]:
+        from pathlib import Path as _Path
+
+        project_dir = project_directory_from(payload)
+        loaded = load_trust_policy(
+            _Path(__import__("os").path.realpath(project_dir)))
+        policy = loaded["policy"]
+        identity = {"version": policy.version, "digest": policy.digest,
+                    "source": policy.policy_source}
+    else:
+        policy = resolved["policy"]
+        identity = resolved["identity"]
+    entries = [c for c in stored.get("candidates", [])]
+    if not entries:
+        return {"ok": False,
+                "message": "REPLAY_INPUT_INSUFFICIENT:candidates"}
+    candidates: list[TrustCandidate] = []
+    derived_map: dict[str, list[str]] = {}
+    known: set[str] = set()
+    for entry in entries:
+        trust_input = entry.get("trust_input", {})
+        candidates.append(TrustCandidate(
+            unit_id=entry["candidate_id"],
+            source_id=entry["source_id"],
+            project_id=stored.get("project", {}).get("project_id", ""),
+            text=entry.get("snapshot_text", ""),
+            source_class=trust_input.get("source_class",
+                                         "informational"),
+            role=trust_input.get("role", "ordinary"),
+            temporal_status=(entry.get("temporal") or {}).get(
+                "status", "not_modelled"),
+            frame_control="query_only",
+            claim_key=trust_input.get("claim_key", ""),
+            derived_from=tuple(trust_input.get("derived_from", [])),
+            refuted_by=tuple(trust_input.get("refuted_by", [])),
+            restricted_to=tuple(trust_input.get("restricted_to", []))))
+        derived_map[entry["source_id"]] = list(
+            trust_input.get("derived_from", []))
+        known.add(entry["source_id"])
+    caller = ((payload.get("trust") or {}).get("caller_scope")
+              if isinstance(payload.get("trust"), dict) else None)
+    caller = caller or (stored.get("stages", {}).get("trust") or {}).get(
+        "caller_scope", "default")
+    ctx = TrustContext(
+        policy=policy, revoked=set(
+            (stored.get("stages", {}).get("trust") or {}).get(
+                "revoked_sources", [])),
+        restricted=(stored.get("stages", {}).get("trust") or {}).get(
+            "restricted_sources", {}),
+        derived_from=derived_map, known_sources=known,
+        project_id=stored.get("project", {}).get("project_id", ""),
+        caller_scope=caller, level="FULL")
+    records = judge_all(candidates, ctx)
+    verdicts = {r.unit_id: {"verdict": r.verdict.value,
+                            "reason": r.reason, "stage": r.stage}
+                for r in records}
+    admitted = [r.unit_id for r in records
+                if r.verdict.value == "admit"]
+    pseudo = _pseudo_trace_for_replay(
+        stored, verdicts, admitted, "trust", identity, frozen)
+    return {"ok": True, "verdicts": verdicts, "selected_ids": admitted,
+            "bundle_digest": pseudo["bundle"]["bundle_digest"],
+            "pseudo_trace": pseudo, "policy_identity": identity,
+            "boundary": ["trust: replayed", "selection: rerun downstream"]}
+
+
+def _replay_selection(stored: dict, payload: dict,
+                      frozen: list) -> dict:
+    from remembering.select.model import SelectionCandidate
+    from remembering.select.policy import select as select_policy
+
+    mode = payload.get("selection_mode", "full")
+    if not isinstance(mode, str) or mode.strip().lower() not in (
+            "decisive", "full"):
+        raise BridgeError(
+            "CONFIG_INVALID",
+            f"unknown selection_mode {payload.get('selection_mode')!r}: "
+            "expected 'decisive' or 'full'.")
+    mode = mode.strip().lower()
+    admitted = [c for c in stored.get("candidates", [])
+                if c.get("trust", {}).get("verdict") == "admit"
+                or c.get("final_selected")]
+    if not admitted:
+        return {"ok": False,
+                "message": "REPLAY_INPUT_INSUFFICIENT:admitted pool"}
+    candidates: list[SelectionCandidate] = []
+    derived_map: dict[str, list[str]] = {}
+    for entry in admitted:
+        trust_input = entry.get("trust_input", {})
+        retrieval = entry.get("retrieval", {})
+        selection = entry.get("selection", {})
+        candidates.append(SelectionCandidate(
+            chunk_id=entry["candidate_id"],
+            source_id=entry["source_id"],
+            text=entry.get("snapshot_text", ""),
+            fused_rank=retrieval.get("fused_rank") or 0,
+            lexical_rank=retrieval.get("lexical_rank"),
+            dense_rank=retrieval.get("dense_rank"),
+            score=float(retrieval.get("score") or 0.0),
+            from_query="lexical" in (retrieval.get("paths", []) or []),
+            from_objective="objective" in (retrieval.get("paths", [])
+                                           or []),
+            temporal_status=(entry.get("temporal") or {}).get(
+                "status", "not_modelled"),
+            frame_control="query_only",
+            evidence_class="prose",
+            frame_preferred=False,
+            trust_reason=(entry.get("trust") or {}).get("reason", ""),
+            source_class=trust_input.get("source_class",
+                                         "informational"),
+            role=trust_input.get("role", "ordinary"),
+            claim_key=trust_input.get("claim_key", ""),
+            derived_from=tuple(trust_input.get("derived_from", [])),
+            dispute_key="",
+            negative=False,
+            constraint_hit=False))
+        derived_map[entry["source_id"]] = list(
+            trust_input.get("derived_from", []))
+    stored_selection = stored.get("stages", {}).get("selection", {})
+    result = select_policy(
+        candidates, derived_map,
+        max_chars=(stored.get("request", {}) or {}).get("max_chars", 4000),
+        max_results=(stored.get("request", {}) or {}).get("max_results", 6),
+        mode=mode)
+    selected_ids = [r.chunk_id for r in result.selected]
+    verdicts = {r.chunk_id: {"disposition": r.disposition.value,
+                             "reason": r.reason}
+                for r in (*result.selected, *result.dropped)}
+    pseudo = _pseudo_trace_for_replay(
+        stored, verdicts, selected_ids, "selection",
+        {"mode": mode,
+         "policy_version": stored_selection.get("policy_version")},
+        frozen)
+    return {"ok": True, "verdicts": verdicts,
+            "selected_ids": selected_ids,
+            "bundle_digest": pseudo["bundle"]["bundle_digest"],
+            "pseudo_trace": pseudo,
+            "policy_identity": {"mode": mode},
+            "boundary": ["selection: replayed"]}
+
+
+def _pseudo_trace_for_replay(stored: dict, verdicts: dict,
+                             selected_ids: list, kind: str,
+                             policy_identity: dict, frozen: list) -> dict:
+    from remembering.trace.canonical import bundle_digest_for
+
+    order = [c["candidate_id"] for c in stored.get("candidates", [])
+             if c["candidate_id"] in set(selected_ids)]
+    lines = []
+    for cid in order:
+        candidate = next(c for c in stored.get("candidates", [])
+                         if c["candidate_id"] == cid)
+        lines.append(f"[source: {candidate.get('source_id')} | "
+                     f"chunk: {cid}]\n{candidate.get('snapshot_text', '')}")
+    content = "\n\n---\n\n".join(lines)
+    pseudo = {
+        "schema_version": stored.get("schema_version"),
+        "project": stored.get("project", {}),
+        "created_at": stored.get("created_at"),
+        "request": stored.get("request", {}),
+        "route": stored.get("route", {}),
+        "versions": stored.get("versions", {}),
+        "stages": stored.get("stages", {}),
+        "candidates": stored.get("candidates", []),
+        "candidate_pool": stored.get("candidate_pool", {}),
+        "bundle": {"content": content, "chars": len(content),
+                   "render_order": order,
+                   "bundle_digest": bundle_digest_for(content)},
+        "funnel": stored.get("funnel", {}),
+        "timings": {},
+        "input_digest": stored.get("input_digest"),
+    }
+    return pseudo
+
+
+def _do_trace_diff(connection, schema: str,
+                   payload: dict[str, Any]) -> dict[str, Any]:
+    from remembering.trace import postgres as trace_pg
+    from remembering.trace.replay import diff_traces
+
+    trace_id = payload.get("trace_id")
+    other_id = payload.get("diff_with")
+    if not isinstance(trace_id, str) or not trace_id.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "mode 'diff' requires trace_id")
+    if not isinstance(other_id, str) or not other_id.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "mode 'diff' requires diff_with")
+    old = trace_pg.fetch_trace(connection, schema, trace_id.strip())
+    new = trace_pg.fetch_trace(connection, schema, other_id.strip())
+    if old is None or new is None:
+        return {"ok": False, "schema": schema,
+                "message": "TRACE_NOT_FOUND", "diff": None}
+    return {"ok": True, "schema": schema,
+            "diff": diff_traces(old, new)}
+    """Deterministic Stage 6 selection contract (no services)."""
+    _ = payload
+    require_engine()
+    from remembering.select.evaluation import evaluate_selection
+
+    report = evaluate_selection()
+    return {"ok": bool(report["passed"]), **report}
+
+
 def do_frame_eval(payload: dict[str, Any]) -> dict[str, Any]:
     """Deterministic Stage 4 frame contract (no services)."""
     _ = payload
@@ -2557,7 +3649,7 @@ def main() -> None:
             "usage: remembering_bridge.py "
             "<doctor|setup|refresh|search|context|capture_session|"
             "route_eval|temporal_import|state|temporal_eval|frame_eval|"
-            "trust_import|trust_eval>")
+            "trust_import|trust_eval|selection_eval|trace|trace_eval>")
     action = sys.argv[1]
     payload = read_payload()
 
@@ -2587,6 +3679,12 @@ def main() -> None:
         result = do_trust_import(payload)
     elif action == "trust_eval":
         result = do_trust_eval(payload)
+    elif action == "selection_eval":
+        result = do_selection_eval(payload)
+    elif action == "trace":
+        result = do_trace(payload)
+    elif action == "trace_eval":
+        result = do_trace_eval(payload)
     else:
         raise BridgeError("CONFIG_INVALID",
                           f"unknown bridge action: {action}")

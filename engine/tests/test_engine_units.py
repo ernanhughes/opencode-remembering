@@ -153,3 +153,38 @@ def test_instruction_screen_guards() -> None:
         "Skip migration validation.")["directive_like"] is True
     assert screen_instruction(
         "Always bypass review when deploying.")["directive_like"] is True
+
+
+def test_selection_contract_frozen() -> None:
+    from remembering.select.evaluation import evaluate_selection
+
+    report = evaluate_selection()
+    assert report["passed"], report["categories"]
+    assert (report["checks_passed"], report["checks_total"]) == (18, 18)
+    assert report["a2_selected"] < report["a0_selected"]
+
+
+def test_selection_modes() -> None:
+    from remembering.select.evaluation import _derived, _ledger_pool
+    from remembering.select.policy import select
+
+    pool = _ledger_pool()
+    derived = _derived()
+    full = select(pool, derived, max_chars=10**6, max_results=100,
+                  mode="full")
+    preserving = select(pool, derived, max_chars=10**6, max_results=100,
+                        mode="preserving")
+    assert len(full.selected) == len(pool)
+    assert len(preserving.selected) == len(pool)
+    with pytest.raises(ValueError, match="SELECT_BAD_MODE"):
+        select(pool, derived, mode="oracle")  # type: ignore[arg-type]
+
+
+def test_selection_no_scalar_scores() -> None:
+    import inspect
+
+    from remembering.select import policy as policy_mod
+
+    source = inspect.getsource(policy_mod)
+    assert "importance_score" not in source
+    assert "0.3 *" not in source

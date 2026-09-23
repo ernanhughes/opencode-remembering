@@ -58,6 +58,25 @@
 > benign retention are preserved. No scalar scores, no truth claims,
 > no open loops, no consolidation.
 
+> Status 2026-09-24 (later still): **Stage 6 (decisive evidence +
+> provenance) is implemented and verified live.** Staged deterministic
+> selection over admitted candidates only: decisive/supporting/
+> contextual/redundant classes, echo suppression, provenance closure,
+> disagreement preservation, explicit budget with insufficiency
+> reporting. Same-admitted-pool proof shows a smaller decisive bundle
+> with required evidence, provenance, and counterpoints intact. No
+> LLM selector, no scalar scores, no summarization, no consensus
+> merging. Recall preserves broadly.
+
+> Status 2026-09-24 (later still): **Stage 7 (durable ContextTrace +
+> replay) is implemented and verified live.** Every context
+> construction persists an immutable content-addressed trace with
+> candidate lifecycles, digests, and policy versions; `memory_trace`
+> supports lookup, explanation, verification, bounded trust/selection
+> replay, and diff. Influence requires persistence before injection.
+> No new policy, no readers, no scores. Traces are audit state, never
+> re-ingested memory.
+
 This repository has been bootstrapped far enough for OpenCode to take over implementation.
 
 The architectural decision is now fixed:

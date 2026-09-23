@@ -19,7 +19,7 @@ import { loadConfig } from "./config";
 
 function usage(): never {
   console.error(
-    "usage: dev-cli.ts <doctor|setup|refresh|search|context|route-eval|temporal-import|temporal-state|temporal-eval|frame-health|frame-eval|trust-health|trust-import|trust-eval> [query] [--dir <path>] [--route auto|recall|influence] [--temporal-mode MODE] [--valid-at ISO] [--known-at ISO] [--subject S] [--work-mode auto|explicit|none] [--work-type T] [--objective O] [--caller-scope S] [--trust-level FULL]",
+    "usage: dev-cli.ts <doctor|setup|refresh|search|context|route-eval|temporal-import|temporal-state|temporal-eval|frame-health|frame-eval|trust-health|trust-import|trust-eval|trace|trace-eval> [query] [--dir <path>] [--route auto|recall|influence] [--temporal-mode MODE] [--valid-at ISO] [--known-at ISO] [--subject S] [--work-mode auto|explicit|none] [--work-type T] [--objective O] [--caller-scope S] [--trust-level FULL] [--selection decisive]",
   );
   process.exit(2);
 }
@@ -73,6 +73,7 @@ const workType = flagValue("--work-type");
 const objectiveFlag = flagValue("--objective");
 const callerScope = flagValue("--caller-scope");
 const trustLevel = flagValue("--trust-level");
+const selectionMode = flagValue("--selection");
 const requestedWork =
   workMode === undefined &&
   workType === undefined &&
@@ -84,6 +85,72 @@ const requestedWork =
         objective: objectiveFlag,
       };
 const rest = rawArgs.slice(1);
+
+function traceArgs(): import("./client").TraceRequest {
+  const sub = (rawArgs[1] ?? "get").toLowerCase();
+  const getFlag = (name: string): string | undefined => {
+    const flag = rawArgs.indexOf(name);
+    if (flag === -1) return undefined;
+    const value = rawArgs[flag + 1];
+    rawArgs.splice(flag, 2);
+    return value;
+  };
+  if (sub === "get" || sub === "verify") {
+    const traceId = rawArgs[2] ?? getFlag("--trace-id") ?? "";
+    return { mode: sub, trace_id: traceId } as import("./client").TraceRequest;
+  }
+  if (sub === "explain") {
+    return {
+      mode: "explain",
+      trace_id: rawArgs[2] ?? "",
+      candidate_id: rawArgs[3] ?? getFlag("--candidate") ?? "",
+    };
+  }
+  if (sub === "replay") {
+    return {
+      mode: "replay",
+      trace_id: rawArgs[2] ?? "",
+      replay_kind:
+        (getFlag("--kind") as "trust" | "selection" | undefined) ?? "trust",
+      selection_mode:
+        (getFlag("--selection-mode") as "decisive" | "full" | undefined) ??
+        "full",
+      persist: rawArgs.includes("--persist"),
+    };
+  }
+  if (sub === "diff") {
+    return {
+      mode: "diff",
+      trace_id: rawArgs[2] ?? "",
+      diff_with: rawArgs[3] ?? getFlag("--with") ?? "",
+    };
+  }
+  // find
+  const filters: Record<string, unknown> = {};
+  for (const key of [
+    "source",
+    "chunk",
+    "route",
+    "work-type",
+    "policy-stage",
+    "policy-version",
+    "terminal-stage",
+  ]) {
+    const value = getFlag(`--${key}`);
+    if (value !== undefined) {
+      filters[
+        key === "source"
+          ? "source_id"
+          : key === "chunk"
+            ? "chunk_id"
+            : key.replace(/-/g, "_")
+      ] = value;
+    }
+  }
+  const limit = getFlag("--limit");
+  if (limit !== undefined) filters.limit = Number(limit);
+  return { mode: "find", filters } as import("./client").TraceRequest;
+}
 
 const config = await loadConfig(directory);
 const client = new ProjectMemoryClient(config, directory);
@@ -122,6 +189,11 @@ switch (command) {
               | "FULL"
               | undefined,
           },
+      selectionMode === undefined
+        ? undefined
+        : {
+            mode: selectionMode as "decisive" | "full",
+          },
     );
     break;
   case "route-eval":
@@ -157,6 +229,15 @@ switch (command) {
     break;
   case "trust-eval":
     result = await client.trustEval();
+    break;
+  case "selection-eval":
+    result = await client.selectionEval();
+    break;
+  case "trace":
+    result = await client.trace(traceArgs());
+    break;
+  case "trace-eval":
+    result = await client.traceEval();
     break;
   default:
     usage();

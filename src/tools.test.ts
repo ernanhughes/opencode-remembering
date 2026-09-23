@@ -15,6 +15,7 @@ import {
   MemorySearch,
   MemorySetup,
   MemoryState,
+  MemoryTrace,
 } from "./tools";
 
 function fakeClient(overrides: Partial<ProjectMemoryClient>): ProjectMemoryClient {
@@ -35,7 +36,6 @@ const HEALTH: HealthReport = {
   pgvector_available: true,
   pgvector_version: "0.8.0",
   pg_trgm_available: true,
-  project_memory_importable: true,
   schema_initialized: true,
   schema_identity_ok: true,
   embedding_provider_reachable: true,
@@ -84,6 +84,24 @@ const HEALTH: HealthReport = {
     revoked_sources: [],
     restricted_sources: {},
     policy_error: null,
+  },
+  selection: {
+    select_engine_version: "select-engine-v0.1",
+    policy_version: "decisive-selection-v0.1",
+    budget_version: "context-budget-v0.1",
+    redundancy_version: "redundancy-v0.1",
+    provenance_version: "provenance-selection-v0.1",
+  },
+  trace: {
+    trace_engine_version: "trace-engine-v0.1",
+    store_version: "trace-store-v0.1",
+    schema_version: "context-trace-v0.1",
+    replay_version: "trace-replay-v0.1",
+    ready: true,
+    trace_count: 1,
+    oldest_trace: null,
+    newest_trace: null,
+    retention: "indefinite",
   },
 };
 
@@ -194,6 +212,19 @@ describe("memory tools", () => {
         denied: 0,
         quarantined: 0,
       },
+      selection: {
+        policy_version: "decisive-selection-v0.1",
+        input_count: 0,
+        selected_count: 0,
+        dropped_redundant: 0,
+        dropped_low_value: 0,
+        dropped_budget: 0,
+        chars_before: 0,
+        chars_after: 0,
+        compression_ratio: 1.0,
+        budget_insufficient: false,
+      },
+      trace_persisted: true,
       admission_note: "retrieval evidence only",
     };
     const tool = MemoryContext(
@@ -240,7 +271,20 @@ describe("memory tools", () => {
               denied: 0,
               quarantined: 0,
             },
+            selection: {
+              policy_version: "decisive-selection-v0.1",
+              input_count: 0,
+              selected_count: 0,
+              dropped_redundant: 0,
+              dropped_low_value: 0,
+              dropped_budget: 0,
+              chars_before: 0,
+              chars_after: 0,
+              compression_ratio: 1.0,
+              budget_insufficient: false,
+            },
             admission_note: "",
+            trace_persisted: true,
           };
         },
       }),
@@ -281,7 +325,20 @@ describe("memory tools", () => {
               denied: 0,
               quarantined: 0,
             },
+            selection: {
+              policy_version: "decisive-selection-v0.1",
+              input_count: 0,
+              selected_count: 0,
+              dropped_redundant: 0,
+              dropped_low_value: 0,
+              dropped_budget: 0,
+              chars_before: 0,
+              chars_after: 0,
+              compression_ratio: 1.0,
+              budget_insufficient: false,
+            },
             admission_note: "",
+            trace_persisted: true,
           };
         },
       }),
@@ -332,7 +389,20 @@ describe("memory tools", () => {
               denied: 1,
               quarantined: 0,
             },
+            selection: {
+              policy_version: "decisive-selection-v0.1",
+              input_count: 0,
+              selected_count: 0,
+              dropped_redundant: 0,
+              dropped_low_value: 0,
+              dropped_budget: 0,
+              chars_before: 0,
+              chars_after: 0,
+              compression_ratio: 1.0,
+              budget_insufficient: false,
+            },
             admission_note: "",
+            trace_persisted: true,
           };
         },
       }),
@@ -344,6 +414,65 @@ describe("memory tools", () => {
     expect(seenTrust).toEqual({ caller_scope: "release_agent" });
     const parsed = JSON.parse((out as { content: string }).content);
     expect(parsed.trust.denied).toBe(1);
+  });
+
+  test("memory_context forwards selection mode", async () => {
+    let seenSelection: unknown;
+    const tool = MemoryContext(
+      fakeClient({
+        context: async (_q, _c, _m, _r, _t, _w, _tr, selection) => {
+          seenSelection = selection;
+          return {
+            ok: true,
+            indexed: true,
+            schema: "s",
+            items: [],
+            trace: null,
+            trace_id: "hybrid:x",
+            content: "",
+            chars: 0,
+            route: {
+              route: "influence",
+              route_source: "deterministic",
+              route_reason: "test",
+              route_ambiguous: false,
+            },
+            temporal: { mode: "current", valid_at: null, known_at: null },
+            frame: { applied: false, reason: "frame.no_project_frame" },
+            trust: {
+              mode: "enforce",
+              level: "FULL",
+              policy_version: "v1",
+              policy_source: "builtin_default",
+              admitted: 0,
+              denied: 0,
+              quarantined: 0,
+            },
+            selection: {
+              policy_version: "decisive-selection-v0.1",
+              input_count: 0,
+              selected_count: 0,
+              dropped_redundant: 0,
+              dropped_low_value: 0,
+              dropped_budget: 0,
+              chars_before: 0,
+              chars_after: 0,
+              compression_ratio: 1.0,
+              budget_insufficient: false,
+            },
+            admission_note: "",
+            trace_persisted: true,
+          };
+        },
+      }),
+    );
+    const out = await tool.execute!(
+      { query: "q", selection: { mode: "full" } } as never,
+      {} as never,
+    );
+    expect(seenSelection).toEqual({ mode: "full" });
+    const parsed = JSON.parse((out as { content: string }).content);
+    expect(parsed.selection.policy_version).toBe("decisive-selection-v0.1");
   });
 
   test("memory_state returns resolved state", async () => {
@@ -393,5 +522,76 @@ describe("memory tools", () => {
     await expect(
       tool.execute!({ query: "x" } as never, {} as never),
     ).rejects.toThrow("DB_UNREACHABLE");
+  });
+
+  test("memory_trace get/explain/verify route to the bridge", async () => {
+    const seen: unknown[] = [];
+    const tool = MemoryTrace(
+      fakeClient({
+        trace: async (request) => {
+          seen.push(request);
+          return { ok: true, echo: (request as { mode: string }).mode };
+        },
+      }),
+    );
+    const get = await tool.execute!(
+      { mode: "get", trace_id: "ctx_abc" } as never,
+      {} as never,
+    );
+    expect(JSON.parse((get as { content: string }).content)).toEqual({
+      ok: true,
+      echo: "get",
+    });
+    const explain = await tool.execute!(
+      { mode: "explain", trace_id: "ctx_abc", candidate_id: "c1" } as never,
+      {} as never,
+    );
+    expect(JSON.parse((explain as { content: string }).content).echo).toBe(
+      "explain",
+    );
+    const verify = await tool.execute!(
+      { mode: "verify", trace_id: "ctx_abc" } as never,
+      {} as never,
+    );
+    expect(JSON.parse((verify as { content: string }).content).echo).toBe(
+      "verify",
+    );
+    expect(seen).toHaveLength(3);
+  });
+
+  test("memory_trace rejects invalid modes client-side", async () => {
+    const { ProjectMemoryClient } = await import("./client");
+    const client = new ProjectMemoryClient(
+      {
+        dsn: "postgresql://localhost:5432/x",
+        python: "python",
+        schema: "remembering_abc",
+        bridgePath: "bridge/remembering_bridge.py",
+        embedding: { provider: "ollama", model: "bge-m3", host: "x" },
+        retrieval: {
+          mode: "hybrid",
+          lexicalK: 1,
+          denseK: 1,
+          fusionK: 60,
+          rerankK: 1,
+          reranker: "none",
+        },
+        context: { autoInject: false, maxChars: 4000, maxResults: 6 },
+      },
+      process.cwd(),
+    );
+    await expect(
+      client.trace({ mode: "get", trace_id: "  " }),
+    ).rejects.toThrow("trace_id");
+    await expect(
+      client.trace({
+        mode: "replay",
+        trace_id: "ctx_abc",
+        replay_kind: "nope" as never,
+      }),
+    ).rejects.toThrow("replay_kind");
+    await expect(
+      client.trace({ mode: "diff", trace_id: "ctx_a", diff_with: "  " }),
+    ).rejects.toThrow("diff_with");
   });
 });

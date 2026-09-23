@@ -162,10 +162,10 @@ export function buildContextHook(
     if (!bundle.indexed || !bundle.content.trim()) return;
 
     // 4. Inject after the provider's stable prefix (event.system append).
-    //    Route, temporal mode, frame decision, and trust policy travel
-    //    in the wrapper so later policy stages — and the model — can see
-    //    which contract this bundle was served under. Detail stays in
-    //    the trace.
+    //    Route, temporal mode, frame decision, trust policy, and
+    //    selection policy travel in the wrapper so later policy stages
+    //    — and the model — can see which contract this bundle was
+    //    served under. Detail stays in the trace.
     const frame = bundle.frame ?? { applied: false };
     event.system.push({
       type: "text",
@@ -183,6 +183,7 @@ export function buildContextHook(
             }
           : {},
         bundle.trust?.policy_version ?? undefined,
+        bundle.selection?.policy_version ?? undefined,
       ),
     });
   };

@@ -32,6 +32,8 @@
     "trust-health": "bun src/dev-cli.ts trust-health",
     "trust-import": "bun src/dev-cli.ts trust-import",
     "trust-eval": "bun src/dev-cli.ts trust-eval",
+    "selection-eval": "bun src/dev-cli.ts selection-eval",
+    "trace-eval": "bun src/dev-cli.ts trace-eval",
     "bridge-tests": "python -m pytest bridge/ -v"
   },
   "dependencies": {

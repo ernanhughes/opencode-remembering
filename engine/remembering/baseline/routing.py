@@ -47,6 +47,8 @@ class MemoryRoute(str, Enum):
 EXPLICIT = "explicit"
 DETERMINISTIC = "deterministic"
 
+ROUTING_POLICY_VERSION = "routing-v0.1"
+
 
 @dataclass(frozen=True)
 class RoutingDecision:

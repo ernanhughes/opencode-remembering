@@ -12,6 +12,7 @@ import {
   MemorySetup,
   MemoryState,
   MemoryTemporalImport,
+  MemoryTrace,
 } from "./tools";
 
 const RememberingPlugin = Plugin.define({
@@ -53,6 +54,7 @@ const RememberingPlugin = Plugin.define({
       MemoryContext(client),
       MemoryState(client),
       MemoryTemporalImport(client),
+      MemoryTrace(client),
     ];
 
     await ctx.tool.transform((editor) => {

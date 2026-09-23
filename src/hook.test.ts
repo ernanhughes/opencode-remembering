@@ -46,7 +46,20 @@ function bundleWith(
       denied: 0,
       quarantined: 0,
     },
+    selection: {
+      policy_version: "decisive-selection-v0.1",
+      input_count: 0,
+      selected_count: 0,
+      dropped_redundant: 0,
+      dropped_low_value: 0,
+      dropped_budget: 0,
+      chars_before: 0,
+      chars_after: 0,
+      compression_ratio: 1.0,
+      budget_insufficient: false,
+    },
     admission_note: "retrieval evidence only",
+    trace_persisted: true,
   };
 }
 

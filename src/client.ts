@@ -16,7 +16,6 @@ export type HealthReport = {
   pgvector_available: boolean;
   pgvector_version: string | null;
   pg_trgm_available: boolean;
-  project_memory_importable: boolean;
   schema_initialized: boolean;
   schema_identity_ok: boolean;
   embedding_provider_reachable: boolean;
@@ -64,6 +63,25 @@ export type HealthReport = {
     revoked_sources: string[];
     restricted_sources: Record<string, string[]>;
     policy_error: string | null;
+  };
+  trace: {
+    trace_engine_version: string;
+    store_version: string | null;
+    schema_version: string;
+    replay_version: string;
+    ready: boolean;
+    trace_count: number;
+    oldest_trace: string | null;
+    newest_trace: string | null;
+    retention: string;
+    error?: string;
+  };
+  selection: {
+    select_engine_version: string;
+    policy_version: string;
+    budget_version: string;
+    redundancy_version: string;
+    provenance_version: string;
   };
   // Backward-compatible bootstrap fields.
   indexed: boolean;
@@ -139,6 +157,8 @@ export type ContextResult = SearchResult & {
   temporal: TemporalEcho;
   frame: FrameBlock;
   trust: TrustSummary;
+  selection: SelectionSummary;
+  trace_persisted: boolean;
   admission_note: string;
 };
 
@@ -207,6 +227,10 @@ export type FrameBlock = {
   excluded?: Array<Record<string, unknown>>;
 };
 
+export type SelectionRequest = {
+  mode?: "decisive" | "full";
+};
+
 export type TemporalStandpointRequest = {
   mode?: "current" | "valid_at" | "as_known" | "bitemporal";
   valid_at?: string;
@@ -216,6 +240,48 @@ export type TemporalStandpointRequest = {
 export type TrustRequest = {
   caller_scope?: string;
   level?: "T0" | "S1" | "S2" | "S3" | "FULL";
+};
+
+export type TraceRequest =
+  | { mode: "get"; trace_id: string }
+  | { mode: "verify"; trace_id: string }
+  | {
+      mode: "find";
+      filters?: {
+        source_id?: string;
+        chunk_id?: string;
+        route?: string;
+        work_type?: string;
+        policy_stage?: string;
+        policy_version?: string;
+        terminal_stage?: string;
+        before?: string;
+        after?: string;
+        limit?: number;
+      };
+    }
+  | { mode: "explain"; trace_id: string; candidate_id: string }
+  | {
+      mode: "replay";
+      trace_id: string;
+      replay_kind: "trust" | "selection";
+      policy?: Record<string, unknown> | "current";
+      selection_mode?: "decisive" | "full";
+      persist?: boolean;
+    }
+  | { mode: "diff"; trace_id: string; diff_with: string };
+
+export type SelectionSummary = {
+  policy_version: string;
+  input_count: number;
+  selected_count: number;
+  dropped_redundant: number;
+  dropped_low_value: number;
+  dropped_budget: number;
+  chars_before: number;
+  chars_after: number;
+  compression_ratio: number;
+  budget_insufficient: boolean;
 };
 
 export type TrustSummary = {
@@ -369,6 +435,52 @@ function validateTrustRequest(trust: TrustRequest): void {
     throw new Error(
       `Invalid trust level ${JSON.stringify(trust.level)}: expected 'T0', 'S1', 'S2', 'S3' or 'FULL'.`,
     );
+  }
+}
+
+function validateSelectionRequest(selection: SelectionRequest): void {
+  const mode = selection.mode ?? "decisive";
+  if (mode !== "decisive" && mode !== "full") {
+    throw new Error(
+      `Invalid selection mode ${JSON.stringify(selection.mode)}: expected 'decisive' or 'full'.`,
+    );
+  }
+}
+
+function validateTraceRequest(request: TraceRequest): void {
+  if (request.mode === "get" || request.mode === "verify") {
+    if (!request.trace_id.trim()) {
+      throw new Error(`Trace mode '${request.mode}' requires trace_id.`);
+    }
+  } else if (request.mode === "find") {
+    const filters = request.filters ?? {};
+    if (
+      filters.limit !== undefined &&
+      (!Number.isInteger(filters.limit) || filters.limit < 1)
+    ) {
+      throw new Error("Trace find limit must be a positive integer.");
+    }
+  } else if (request.mode === "explain") {
+    if (!request.trace_id.trim() || !request.candidate_id.trim()) {
+      throw new Error(
+        "Trace mode 'explain' requires trace_id and candidate_id.",
+      );
+    }
+  } else if (request.mode === "replay") {
+    if (!request.trace_id.trim()) {
+      throw new Error("Trace mode 'replay' requires trace_id.");
+    }
+    if (request.replay_kind !== "trust" && request.replay_kind !== "selection") {
+      throw new Error(
+        `Invalid replay_kind ${JSON.stringify(request.replay_kind)}.`,
+      );
+    }
+  } else if (request.mode === "diff") {
+    if (!request.trace_id.trim() || !request.diff_with.trim()) {
+      throw new Error(
+        "Trace mode 'diff' requires trace_id and diff_with.",
+      );
+    }
   }
 }
 
@@ -526,6 +638,7 @@ export class ProjectMemoryClient {
     temporal?: TemporalStandpointRequest,
     work?: WorkRequest,
     trust?: TrustRequest,
+    selection?: SelectionRequest,
   ): Promise<ContextResult> {
     if (route !== "auto" && route !== "recall" && route !== "influence") {
       throw new Error(
@@ -541,6 +654,9 @@ export class ProjectMemoryClient {
     if (trust !== undefined) {
       validateTrustRequest(trust);
     }
+    if (selection !== undefined) {
+      validateSelectionRequest(selection);
+    }
     return this.call<ContextResult>("context", {
       query,
       max_chars: maxChars,
@@ -549,6 +665,7 @@ export class ProjectMemoryClient {
       temporal,
       work,
       trust,
+      selection,
     });
   }
 
@@ -590,6 +707,22 @@ export class ProjectMemoryClient {
 
   trustEval(): Promise<TrustEvaluation> {
     return this.call<TrustEvaluation>("trust_eval");
+  }
+
+  selectionEval(): Promise<TemporalEvaluation> {
+    return this.call<TemporalEvaluation>("selection_eval");
+  }
+
+  traceEval(): Promise<TemporalEvaluation> {
+    return this.call<TemporalEvaluation>("trace_eval");
+  }
+
+  async trace(request: TraceRequest): Promise<Record<string, unknown>> {
+    validateTraceRequest(request);
+    return this.call<Record<string, unknown>>("trace", {
+      mode: request.mode,
+      ...(request as Record<string, unknown>),
+    });
   }
 
   temporalEval(): Promise<TemporalEvaluation> {
