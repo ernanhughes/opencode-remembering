@@ -19,7 +19,7 @@ import { loadConfig } from "./config";
 
 function usage(): never {
   console.error(
-    "usage: dev-cli.ts <doctor|setup|refresh|search|context|route-eval|temporal-import|temporal-state|temporal-eval|frame-health|frame-eval|trust-health|trust-import|trust-eval|trace|trace-eval|loop-health|loop-import|loop-list|loop-show|loop-history|loop-eval|loop-rebuild|loop-create> [query] [--dir <path>] [--route auto|recall|influence] [--temporal-mode MODE] [--valid-at ISO] [--known-at ISO] [--subject S] [--work-mode auto|explicit|none] [--work-type T] [--objective O] [--caller-scope S] [--trust-level FULL] [--selection decisive]",
+    "usage: dev-cli.ts <doctor|setup|refresh|search|context|route-eval|temporal-import|temporal-state|temporal-eval|frame-health|frame-eval|trust-health|trust-import|trust-eval|trace|trace-eval|loop-health|loop-import|loop-list|loop-show|loop-history|loop-eval|loop-rebuild|loop-create|remember|correct|supersede|retract|write-health|write-eval|write-rebuild|record-show|action-show|write-history> [query] [--dir <path>] [--route auto|recall|influence] [--temporal-mode MODE] [--valid-at ISO] [--known-at ISO] [--subject S] [--work-mode auto|explicit|none] [--work-type T] [--objective O] [--caller-scope S] [--trust-level FULL] [--selection decisive]",
   );
   process.exit(2);
 }
@@ -307,6 +307,63 @@ switch (command) {
     break;
   case "loop-create":
     result = await client.loopCreate(loopCreateArgs());
+    break;
+  case "remember":
+  case "correct":
+  case "supersede":
+  case "retract": {
+    const action = command as "remember" | "correct" | "supersede" | "retract";
+    const contentFlag = flagValue("--content");
+    const content = contentFlag ?? rest.join(" ") ?? "";
+    const evidenceFlag = flagValue("--evidence");
+    result = await client.remember({
+      action,
+      content,
+      target_record_id:
+        flagValue("--target") ?? (action === "remember" ? undefined : rawArgs[1]),
+      role: (flagValue("--role") as
+        | "ordinary"
+        | "evidence"
+        | "proposal"
+        | "preference"
+        | "decision"
+        | "production_state"
+        | undefined) ?? "ordinary",
+      reason: flagValue("--reason"),
+      evidence_refs: evidenceFlag
+        ? evidenceFlag.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined,
+      effective_from: flagValue("--effective-from"),
+      event_time: flagValue("--event-time"),
+      idempotency_key: flagValue("--idempotency-key"),
+      caller_scope: flagValue("--caller-scope") ?? callerScope,
+      origin: "cli",
+    });
+    break;
+  }
+  case "write-health":
+    result = (await client.doctor()).writes;
+    break;
+  case "write-eval":
+    result = await client.writeEval();
+    break;
+  case "write-rebuild":
+    result = await client.writeRebuild();
+    break;
+  case "record-show":
+    result = await client.recordShow(
+      rawArgs[1] ?? flagValue("--record") ?? "",
+    );
+    break;
+  case "action-show":
+    result = await client.actionShow(
+      rawArgs[1] ?? flagValue("--action") ?? "",
+    );
+    break;
+  case "write-history":
+    result = await client.writeHistory(
+      flagValue("--record") ?? rawArgs[1] ?? "",
+    );
     break;
   default:
     usage();

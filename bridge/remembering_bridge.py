@@ -819,6 +819,31 @@ def doctor(payload: dict[str, Any]) -> dict[str, Any]:
             "uncertain": 0,
             "unresolved_evidence_refs": [],
         },
+        "writes": {
+            "write_engine_version": "write-engine-v0.1",
+            "store_version": None,
+            "record_schema_version": "explicit-memory-record-v0.1",
+            "action_schema_version": "memory-action-v0.1",
+            "relation_version": "memory-relation-v0.1",
+            "ready": False,
+            "policy": {
+                "configured": False,
+                "valid": True,
+                "version": None,
+                "digest": None,
+                "source": "builtin_default",
+                "error": None,
+            },
+            "record_count": 0,
+            "action_count": 0,
+            "remember_count": 0,
+            "correct_count": 0,
+            "supersede_count": 0,
+            "retract_count": 0,
+            "relationship_count": 0,
+            "unresolved_index_records": [],
+            "last_action_at": None,
+        },
     }
 
     def fail(message: str) -> dict[str, Any]:
@@ -938,6 +963,8 @@ def doctor(payload: dict[str, Any]) -> dict[str, Any]:
                 report["trace"] = trace_health(connection, schema)
                 report["loops"] = loops_health(connection, schema,
                                                project_dir)
+                report["writes"] = write_health(connection, schema,
+                                                project_dir)
     finally:
         connection.close()
 
@@ -1174,6 +1201,14 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
             if trust_check["error"]:
                 raise BridgeError("TRUST_POLICY_INVALID",
                                   trust_check["error"])
+            from remembering.write import postgres as write_pg
+
+            write_versions = write_pg.initialise(
+                baseline.store.conn, schema)
+            write_check = validate_write_config(project_dir)
+            if write_check["error"]:
+                raise BridgeError("WRITE_POLICY_INVALID",
+                                  write_check["error"])
             state["baseline"] = baseline
             state["temporal_versions"] = temporal_versions
             return (f"schema {schema} initialised "
@@ -1182,7 +1217,9 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
                     f"{standing_versions['store_version']}; "
                     f"{trace_versions['store_version']}; "
                     f"{loop_versions['store_version']}; "
-                    f"trust policy {trust_check['detail']})")
+                    f"{write_versions['store_version']}; "
+                    f"trust policy {trust_check['detail']}; "
+                    f"write policy {write_check['detail']})")
 
         _timed(steps, "initialise", s_initialise)
 
@@ -1195,11 +1232,15 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
                 baseline.store.conn, schema, project_dir)
             loops = import_loop_events(
                 baseline.store.conn, schema, project_dir)
+            memory = import_memory_events(
+                baseline.store.conn, schema, project_dir,
+                state["embedder"])
             refresh_dict = refresh_report_to_dict(refresh)
             refresh_dict["schema"] = schema
             refresh_dict["temporal"] = temporal
             refresh_dict["trust"] = standing
             refresh_dict["loops"] = loops
+            refresh_dict["writes"] = memory
             result["refresh"] = refresh_dict
             if refresh.unchanged and not (
                     refresh.added or refresh.changed or refresh.removed):
@@ -1226,6 +1267,15 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
                                   f"{loops['failed']}")
             elif loops["imported"]:
                 temporal_note += (f"; loop events +{loops['imported']}")
+            if memory["failed"]:
+                temporal_note += (f"; memory import failures: "
+                                  f"{memory['failed']}")
+            elif memory["imported"]:
+                temporal_note += (f"; memory actions "
+                                  f"+{memory['imported']}")
+            if memory["denied"]:
+                temporal_note += (f"; memory import denied: "
+                                  f"{len(memory['denied'])}")
             return (f"discovered {refresh.discovered}, {summary}; "
                     f"failed: {refresh.failed or 'none'}{temporal_note}")
 
@@ -1290,10 +1340,12 @@ def do_refresh(payload: dict[str, Any]) -> dict[str, Any]:
             from remembering.trust import postgres as standing_pg
             from remembering.trace import postgres as trace_pg
             from remembering.loops import postgres as loops_pg
+            from remembering.write import postgres as write_pg
 
             standing_pg.initialise(baseline.store.conn, schema)
             trace_pg.initialise(baseline.store.conn, schema)
             loops_pg.initialise(baseline.store.conn, schema)
+            write_pg.initialise(baseline.store.conn, schema)
             refresh = baseline.refresh(Path(os.path.realpath(project_dir)))
             temporal = import_temporal_events(
                 baseline.store.conn, schema, project_dir)
@@ -1301,11 +1353,14 @@ def do_refresh(payload: dict[str, Any]) -> dict[str, Any]:
                 baseline.store.conn, schema, project_dir)
             loops = import_loop_events(
                 baseline.store.conn, schema, project_dir)
+            memory = import_memory_events(
+                baseline.store.conn, schema, project_dir, embedder)
             out = refresh_report_to_dict(refresh)
             out["schema"] = schema
             out["temporal"] = temporal
             out["trust"] = standing
             out["loops"] = loops
+            out["writes"] = memory
             if temporal["failed"]:
                 out["message"] = (
                     f"discovered {refresh.discovered}: +{refresh.added} "
@@ -1324,6 +1379,15 @@ def do_refresh(payload: dict[str, Any]) -> dict[str, Any]:
                     f"~{refresh.changed} -{refresh.removed}, "
                     f"{refresh.embedded} chunks embedded; "
                     f"LOOP import failures: {loops['failed']}")
+            elif memory["failed"] or memory["denied"]:
+                out["message"] = (
+                    f"discovered {refresh.discovered}: +{refresh.added} "
+                    f"~{refresh.changed} -{refresh.removed}, "
+                    f"{refresh.embedded} chunks embedded; "
+                    f"MEMORY import: +{memory['imported']} "
+                    f"duplicates={memory['duplicates']} "
+                    f"denied={len(memory['denied'])} "
+                    f"failed={memory['failed']}")
             elif refresh.unchanged and not (
                     refresh.added or refresh.changed or refresh.removed):
                 out["message"] = (f"nothing changed: {refresh.unchanged} "
@@ -1461,6 +1525,7 @@ def do_search(payload: dict[str, Any]) -> dict[str, Any]:
                  for c in trace.reranked[:limit]]
         annotate_search_standing(
             items, schema, project_dir_from_search(payload))
+        annotate_explicit_metadata(items, schema)
         return {"ok": True, "indexed": True, "schema": schema,
                 "items": items,
                 "trace": trace_to_dict(trace, emb_identity, ret)}
@@ -1982,6 +2047,19 @@ def apply_trust_gate(schema: str, project_dir: Path,
     loaded = load_trust_policy(Path(os.path.realpath(project_dir)))
     policy = loaded["policy"]
     claims = load_claims_map(project_dir)
+    explicit_attrs: dict[str, dict] = {}
+    try:
+        from remembering.write import postgres as write_pg
+
+        _wconn = raw_connect()
+        try:
+            explicit_attrs = write_pg.source_attributes(
+                _wconn, schema,
+                [c.source_id for c in ranked])
+        finally:
+            _wconn.close()
+    except Exception:
+        explicit_attrs = {}
     connection = raw_connect()
     try:
         standing_pg.initialise(connection, schema)
@@ -1991,10 +2069,14 @@ def apply_trust_gate(schema: str, project_dir: Path,
     standing = resolve_standing(events)
 
     from remembering.trust.policy import match_rule
+    from remembering.write.model import effective_class
 
     candidates: list[TrustCandidate] = []
     roles_by_id: dict[str, str] = {}
     restricted_by_id: dict[str, list] = {}
+    ceiling_by_id: dict[str, dict] = {}
+    override: dict[str, str] = {}
+    ceilings: dict[str, str] = {}
     loop_meta = loop_meta or {}
     for chunk in ranked:
         annotation = by_annotation.get(chunk.chunk_id)
@@ -2004,12 +2086,17 @@ def apply_trust_gate(schema: str, project_dir: Path,
         role = None
         claim = claims.get(chunk.source_id, {})
         loop_claim = loop_meta.get(chunk.chunk_id, {})
+        explicit = explicit_attrs.get(chunk.source_id)
         if loop_claim.get("role"):
             role = loop_claim["role"]
         elif claim.get("role"):
             role = claim["role"]
         elif rule is not None:
             role = rule.role
+        elif explicit is not None:
+            # The write gate already authorized this role; the
+            # trust policy classifies the source, never the caller.
+            role = explicit.get("role") or "ordinary"
         else:
             role = "ordinary"
         roles_by_id[chunk.chunk_id] = role or "ordinary"
@@ -2031,6 +2118,18 @@ def apply_trust_gate(schema: str, project_dir: Path,
             derived_from=tuple(derived),
             refuted_by=tuple(claim.get("refuted_by", [])),
             restricted_to=tuple(restricted)))
+        if explicit is not None and explicit.get("standing_ceiling"):
+            # Two-key rule: the write ceiling caps the trust
+            # resolution. Neither side escalates the other.
+            ceiling = explicit["standing_ceiling"]
+            policy_class = source_class
+            effective = effective_class(policy_class, ceiling)
+            override[chunk.source_id] = effective
+            ceilings[chunk.source_id] = ceiling
+            ceiling_by_id[chunk.chunk_id] = {
+                "trust_policy_class": policy_class,
+                "write_ceiling": ceiling,
+                "effective_class": effective}
     derived_map = {c.source_id: list(c.derived_from) for c in candidates}
     known = ({c.source_id for c in candidates}
              | set(standing_pg_known_subjects(events)))
@@ -2039,14 +2138,18 @@ def apply_trust_gate(schema: str, project_dir: Path,
         restricted=standing["restricted"], derived_from=derived_map,
         known_sources=known, project_id=schema,
         caller_scope=trust_spec["caller_scope"],
-        level=trust_spec["level"])
+        level=trust_spec["level"], standing_override=override,
+        write_ceiling=ceilings)
     records = judge_all(candidates, ctx)
     latency_ms = round((_time.perf_counter() - started) * 1000, 2)
     admitted = [r.unit_id for r in records if r.verdict.value == "admit"]
     denied = [r.unit_id for r in records if r.verdict.value == "deny"]
     quarantined = [r.unit_id for r in records
                    if r.verdict.value == "quarantine"]
-    classes = {c.unit_id: c.source_class for c in candidates}
+    classes = {}
+    for c in candidates:
+        classes[c.unit_id] = override.get(c.source_id,
+                                          c.source_class)
     return {
         "block": {
             "mode": "enforce" if enforce else "annotate",
@@ -2061,6 +2164,7 @@ def apply_trust_gate(schema: str, project_dir: Path,
             "revoked_sources": sorted(standing["revoked"]),
             "restricted_sources": standing["restricted"],
             "standing_events_applied": standing["applied"],
+            "write_ceiling_by_id": ceiling_by_id,
             "records": [r.to_dict() for r in records],
             "admitted_ids": admitted,
             "denied_ids": denied,
@@ -2071,6 +2175,7 @@ def apply_trust_gate(schema: str, project_dir: Path,
         "classes_by_id": classes,
         "roles_by_id": roles_by_id,
         "restricted_by_id": restricted_by_id,
+        "ceiling_by_id": ceiling_by_id,
         "claims_map": claims,
         "admitted_ids": set(admitted),
     }
@@ -2374,6 +2479,16 @@ def collect_versions(ret: dict, emb: dict, versions: dict,
         TRUST_ENGINE_VERSION,
         TRUST_POLICY_VERSION,
     )
+    from remembering.write import (
+        EXPLICIT_RECORD_SCHEMA,
+        MEMORY_ACTION_SCHEMA,
+        RELATION_VERSION,
+        WRITE_ENGINE_VERSION,
+        WRITE_EVAL_VERSION,
+        WRITE_GATE_VERSION,
+        WRITE_POLICY_SCHEMA,
+        WRITE_STORE_VERSION,
+    )
     return {
         "engine_version": ENGINE_VERSION,
         "retrieval": {"mode": ret.get("mode"),
@@ -2419,6 +2534,16 @@ def collect_versions(ret: dict, emb: dict, versions: dict,
             "closure_version": LOOP_CLOSURE_VERSION,
             "context_version": LOOP_CONTEXT_VERSION,
             "eval_version": LOOP_EVAL_VERSION,
+        },
+        "write": {
+            "write_engine_version": WRITE_ENGINE_VERSION,
+            "store_version": WRITE_STORE_VERSION,
+            "record_schema_version": EXPLICIT_RECORD_SCHEMA,
+            "action_schema_version": MEMORY_ACTION_SCHEMA,
+            "relation_version": RELATION_VERSION,
+            "write_policy_schema": WRITE_POLICY_SCHEMA,
+            "write_gate_version": WRITE_GATE_VERSION,
+            "eval_version": WRITE_EVAL_VERSION,
         },
         "trace": {
             "trace_engine_version": TRACE_ENGINE_VERSION,
@@ -2729,6 +2854,17 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
     annotated = annotate_candidates(
         ranked, log, now=standpoint.known_at or now)
     by_annotation = {a.chunk_id: a for a in annotated}
+    # Stage 9 relationship overlay: explicit-memory lifecycle
+    # relations adjust annotation under the same standpoint before
+    # the existing admission runs. Recall still preserves all.
+    from remembering.write.overlay import (
+        apply_relationship_overlay as _apply_overlay,
+    )
+
+    _overlay_data = load_write_overlay(schema)
+    write_overlay = _apply_overlay(
+        annotated, _overlay_data["relations"],
+        _overlay_data["records"], standpoint, now)
     subjects = sorted({a.subject for a in annotated if a.subject})
     resolved = {s: resolve_subject(log, s, standpoint) for s in subjects}
     selected, suppressed = admit_for_route(annotated, decision.route)
@@ -2866,12 +3002,17 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
                 standing_tag = (
                     f" | standing: "
                     f"{trust_classes.get(chunk.chunk_id, 'unknown')}")
+            explicit_tag = ""
+            if item["source_id"].startswith("memory://explicit/"):
+                explicit_tag = (
+                    f" | role: "
+                    f"{trust_out['roles_by_id'].get(chunk.chunk_id, 'ordinary')}")
             section = f" | {item['section']}" if item["section"] else ""
             header = (f"[source: {item['source_id']}{section} | "
                       f"chunk: {item['chunk_id']} | rank: {item['rank']} | "
                       f"score: {item['score']:.4f} | "
                       f"temporal: {temporal_status}{frame_tag}"
-                      f"{standing_tag}]\n")
+                      f"{standing_tag}{explicit_tag}]\n")
             separator = "\n\n---\n\n" if parts else ""
             text = item["text"]
             # assemble() always admits the top-ranked chunk even when it
@@ -2914,6 +3055,7 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         "subjects": resolved,
         "suppressed": [s.to_dict() for s in suppressed],
         "annotations": [a.to_dict() for a in annotated],
+        "write_overlay": write_overlay,
         "selected_ids": [i["chunk_id"] for i in admitted],
         "dropped_duplicates": bundle_dropped_duplicates,
         "dropped_over_budget": bundle_dropped_over_budget,
@@ -2970,8 +3112,10 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
     frame_kept_ids = {c.chunk_id for c in kept} if frame_applied else None
     rendered_ids = [i["chunk_id"] for i in admitted]
     trust_inputs: dict[str, dict] = {}
+    ceiling_map = trust_out.get("ceiling_by_id", {})
     for item in pool_items:
         claim = (trust_out["claims_map"] or {}).get(item["source_id"], {})
+        ceiling_info = ceiling_map.get(item["chunk_id"], {})
         trust_inputs[item["chunk_id"]] = {
             "source_class": trust_classes.get(item["chunk_id"],
                                               "informational"),
@@ -2982,6 +3126,9 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
             "refuted_by": claim.get("refuted_by", []),
             "restricted_to": trust_out.get("restricted_by_id", {}).get(
                 item["chunk_id"], []),
+            "write_ceiling": ceiling_info.get("write_ceiling"),
+            "trust_policy_class": ceiling_info.get(
+                "trust_policy_class"),
         }
     lifecycles = build_lifecycles(
         pool_items, temporal_selected_ids, by_annotation, frame_kept_ids,
@@ -3916,18 +4063,34 @@ def _replay_trust(connection, schema: str, stored: dict,
     if not entries:
         return {"ok": False,
                 "message": "REPLAY_INPUT_INSUFFICIENT:candidates"}
+    from remembering.trust.policy import match_rule as _replay_match
+    from remembering.write.model import effective_class as _effective
+
     candidates: list[TrustCandidate] = []
     derived_map: dict[str, list[str]] = {}
     known: set[str] = set()
+    replay_override: dict[str, str] = {}
+    replay_ceilings: dict[str, str] = {}
     for entry in entries:
         trust_input = entry.get("trust_input", {})
+        ceiling = trust_input.get("write_ceiling")
+        if ceiling is not None:
+            rule, _ = _replay_match(policy, entry["source_id"])
+            policy_class = (rule.source_class if rule is not None
+                            else policy.default_source_class)
+            eff = _effective(policy_class, ceiling)
+            replay_override[entry["source_id"]] = eff
+            replay_ceilings[entry["source_id"]] = ceiling
+            entry_class = eff
+        else:
+            entry_class = trust_input.get("source_class",
+                                          "informational")
         candidates.append(TrustCandidate(
             unit_id=entry["candidate_id"],
             source_id=entry["source_id"],
             project_id=stored.get("project", {}).get("project_id", ""),
             text=entry.get("snapshot_text", ""),
-            source_class=trust_input.get("source_class",
-                                         "informational"),
+            source_class=entry_class,
             role=trust_input.get("role", "ordinary"),
             temporal_status=(entry.get("temporal") or {}).get(
                 "status", "not_modelled"),
@@ -3951,7 +4114,9 @@ def _replay_trust(connection, schema: str, stored: dict,
             "restricted_sources", {}),
         derived_from=derived_map, known_sources=known,
         project_id=stored.get("project", {}).get("project_id", ""),
-        caller_scope=caller, level="FULL")
+        caller_scope=caller, level="FULL",
+        standing_override=replay_override,
+        write_ceiling=replay_ceilings)
     records = judge_all(candidates, ctx)
     verdicts = {r.unit_id: {"verdict": r.verdict.value,
                             "reason": r.reason, "stage": r.stage}
@@ -4260,13 +4425,861 @@ def do_capture_session(payload: dict[str, Any]) -> dict[str, Any]:
 
 # -- entry ---------------------------------------------------------------------
 
+# -- explicit memory actions (Stage 9) --------------------------------------
+#
+# A memory write is an event, not an edit to the past. REMEMBER appends
+# one immutable record; CORRECT/SUPERSEDE append one record plus a
+# lifecycle relationship; RETRACT appends a relationship/event without
+# replacement content. Every write carries runtime attribution and the
+# write-policy identity, becomes an ordinary indexed source under
+# memory://explicit/, and later passes the same temporal/frame/trust/
+# selection/trace controls as everything else. WRITE_ALLOWED is never
+# TRUST_ADMITTED: the write policy assigns at most a standing ceiling
+# and Stage 5 remains the final trust authority.
+
+WRITE_ORIGINS = ("opencode", "cli", "import")
+
+MEMORY_EVENTS_REL = Path(".remembering") / "memory" / "events.jsonl"
+
+
+def parse_remember_spec(payload: dict[str, Any]) -> tuple[dict, dict]:
+    """Split a remember payload into the engine request and runtime
+    attribution. Project/actor/surface identity comes from the host
+    adapter here, never from caller-set trust fields (the engine
+    rejects those)."""
+    if not isinstance(payload, dict):
+        raise BridgeError("CONFIG_INVALID",
+                          "remember payload must be an object")
+    raw: dict[str, Any] = {
+        "action": payload.get("action", "remember"),
+        "content": payload.get("content"),
+        "target_record_id": payload.get("target_record_id"),
+        "role": payload.get("role", "ordinary"),
+        "reason": payload.get("reason"),
+        "evidence_refs": payload.get("evidence_refs", []),
+        "effective_from": payload.get("effective_from"),
+        "event_time": payload.get("event_time"),
+        "idempotency_key": payload.get("idempotency_key"),
+    }
+    origin = payload.get("origin", "opencode")
+    if origin is None:
+        origin = "opencode"
+    if not isinstance(origin, str) or origin.strip() not in \
+            WRITE_ORIGINS:
+        raise BridgeError(
+            "CONFIG_INVALID",
+            f"unknown remember origin {payload.get('origin')!r}: "
+            "expected 'opencode', 'cli' or 'import'.")
+    origin = origin.strip()
+    scope = payload.get("caller_scope", "default")
+    if scope is None:
+        scope = "default"
+    if not isinstance(scope, str) or not scope.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "remember caller_scope must be a non-empty "
+                          "string")
+    actor_kind = payload.get("actor_kind")
+    if actor_kind is None:
+        actor_kind = {"opencode": "agent", "cli": "human",
+                      "import": "import"}[origin]
+    if not isinstance(actor_kind, str) or not actor_kind.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "remember actor_kind must be a non-empty "
+                          "string")
+    actor_id = payload.get("actor_id", "")
+    if actor_id is None:
+        actor_id = ""
+    if not isinstance(actor_id, str):
+        raise BridgeError("CONFIG_INVALID",
+                          "remember actor_id must be a string")
+    host_session = payload.get("host_session_id", "")
+    host_tool_call = payload.get("host_tool_call_id", "")
+    for label, value in (("host_session_id", host_session),
+                         ("host_tool_call_id", host_tool_call)):
+        if not isinstance(value, str):
+            raise BridgeError("CONFIG_INVALID",
+                              f"remember {label} must be a string")
+    attribution = {
+        "surface": origin,
+        "caller_scope": scope.strip(),
+        "actor_kind": actor_kind.strip(),
+        "actor_id": actor_id.strip(),
+        "host_session_id": host_session.strip(),
+        "host_tool_call_id": host_tool_call.strip(),
+        "idempotency_key": None,
+    }
+    return raw, attribution
+
+
+def validate_write_config(project_dir: Path) -> dict[str, Any]:
+    """Validate the explicit write policy if present. Absence yields
+    the conservative builtin (healthy); malformed files fail."""
+    from remembering.write.policy import load_write_policy
+
+    loaded = load_write_policy(Path(os.path.realpath(project_dir)))
+    if not loaded["valid"]:
+        return {"error": loaded["error"], "detail": "invalid"}
+    if not loaded["configured"]:
+        return {"error": None, "detail": "builtin default"}
+    policy = loaded["policy"]
+    return {"error": None,
+            "detail": f"explicit v{policy.version}"}
+
+
+def write_health(connection, schema: str,
+                 project_dir: Path) -> dict[str, Any]:
+    """Write section for memory_health. Zero records is healthy;
+    builtin-default policy is healthy; malformed policy is not."""
+    from remembering.write import (
+        EXPLICIT_RECORD_SCHEMA,
+        MEMORY_ACTION_SCHEMA,
+        RELATION_VERSION,
+        WRITE_ENGINE_VERSION,
+        WRITE_STORE_VERSION,
+    )
+    from remembering.write import postgres as write_pg
+    from remembering.write.policy import load_write_policy
+
+    section: dict[str, Any] = {
+        "write_engine_version": WRITE_ENGINE_VERSION,
+        "store_version": WRITE_STORE_VERSION,
+        "record_schema_version": EXPLICIT_RECORD_SCHEMA,
+        "action_schema_version": MEMORY_ACTION_SCHEMA,
+        "relation_version": RELATION_VERSION,
+        "ready": False,
+        "policy": {
+            "configured": False,
+            "valid": True,
+            "version": None,
+            "digest": None,
+            "source": "builtin_default",
+            "error": None,
+        },
+        "record_count": 0,
+        "action_count": 0,
+        "remember_count": 0,
+        "correct_count": 0,
+        "supersede_count": 0,
+        "retract_count": 0,
+        "relationship_count": 0,
+        "unresolved_index_records": [],
+        "last_action_at": None,
+    }
+    loaded = load_write_policy(Path(os.path.realpath(project_dir)))
+    section["policy"] = {
+        "configured": loaded["configured"],
+        "valid": loaded["valid"],
+        "version": loaded["policy"].version,
+        "digest": loaded["policy"].digest,
+        "source": loaded["policy"].policy_source,
+        "error": loaded["error"],
+    }
+    try:
+        with connection.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)",
+                        (f"{schema}.explicit_memory_records",))
+            if cur.fetchone()[0] is None:
+                return section
+        section["ready"] = True
+        tallies = write_pg.counts(connection, schema)
+        section["record_count"] = tallies["records"]
+        section["action_count"] = tallies["actions"]
+        section["remember_count"] = tallies["remember"]
+        section["correct_count"] = tallies["correct"]
+        section["supersede_count"] = tallies["supersede"]
+        section["retract_count"] = tallies["retract"]
+        section["relationship_count"] = tallies["relations"]
+        section["last_action_at"] = tallies["last_action_at"]
+        section["unresolved_index_records"] = \
+            write_pg.unresolved_index_records(connection, schema)
+    except Exception as exc:
+        section["error"] = (
+            f"{type(exc).__name__}: {str(exc)[:160]}")
+    return section
+
+
+def _write_pg_deps(read_conn, schema: str, project_dir: Path,
+                   canonical_dir: str, embedder,
+                   project_id: str) -> dict:
+    """Service dependencies backed by PostgreSQL. Reads ride the
+    shared autocommit connection; each accepted action commits
+    through its own transaction (see _write_transact)."""
+    from remembering.temporal import postgres as temporal_pg
+    from remembering.write import postgres as write_pg
+    from remembering.write.policy import load_write_policy
+
+    def load_policy() -> dict:
+        return load_write_policy(Path(os.path.realpath(project_dir)))
+
+    def evidence_exists(ref: str) -> bool:
+        if write_pg.get_record(read_conn, schema, ref) is not None:
+            return True
+        bare = ref
+        if bare.startswith("memory://explicit/"):
+            bare = bare[len("memory://explicit/"):]
+            if write_pg.get_record(read_conn, schema, bare) \
+                    is not None:
+                return True
+        from psycopg import sql as _sql
+
+        try:
+            with read_conn.cursor() as cur:
+                cur.execute(
+                    _sql.SQL("SELECT 1 FROM {}.sources WHERE "
+                             "source_id = %s").format(
+                        _sql.Identifier(schema)), (ref,))
+                if cur.fetchone() is not None:
+                    return True
+                cur.execute(
+                    _sql.SQL("SELECT 1 FROM {}.chunks WHERE "
+                             "chunk_id = %s").format(
+                        _sql.Identifier(schema)), (ref,))
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+
+    def next_source_seq(source_id: str) -> int:
+        from psycopg import sql as _sql
+
+        with read_conn.cursor() as cur:
+            cur.execute(
+                _sql.SQL("SELECT COALESCE(MAX(source_seq), 0) + 1 "
+                         "FROM {}.temporal_events WHERE source_id = "
+                         "%s").format(_sql.Identifier(schema)),
+                (source_id,))
+            row = cur.fetchone()
+            return int(row[0]) if row is not None else 1
+
+    def embed(texts: list[str]) -> dict:
+        produced = embedder.embed(texts)
+        return {"vectors": [list(v) for v in produced.vectors],
+                "version": embedder.version()}
+
+    return {
+        "load_policy": load_policy,
+        "now": _write_now,
+        "get_record": lambda rid: write_pg.get_record(
+            read_conn, schema, rid),
+        "successors": lambda rid: write_pg.successors_of(
+            read_conn, schema, rid),
+        "get_action": lambda aid: write_pg.get_action(
+            read_conn, schema, aid),
+        "get_action_by_key": lambda key:
+        write_pg.get_action_by_idempotency(read_conn, schema, key),
+        "evidence_exists": evidence_exists,
+        "next_source_seq": next_source_seq,
+        "embed": embed,
+        "transact": lambda body: _write_transact(schema, body),
+    }
+
+
+def _write_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _write_transact(schema: str, body) -> None:
+    """One accepted action, one transaction: canonical record,
+    action event, relationship projection, temporal overlay, and
+    retrieval rows commit together or not at all."""
+    import psycopg
+
+    from remembering.temporal import postgres as temporal_pg
+    from remembering.write import postgres as write_pg
+
+    conn = psycopg.connect(dsn(), autocommit=False)
+    try:
+        def put_record(record) -> None:
+            write_pg.insert_record(conn, schema, record)
+
+        def put_action(event, received_at: str) -> None:
+            write_pg.insert_action(conn, schema, event,
+                                   received_at)
+
+        def put_relation(source: str, target: str, relation: str,
+                         action_id: str, effective,
+                         recorded) -> None:
+            write_pg.insert_relation(conn, schema, source, target,
+                                     relation, action_id, effective,
+                                     recorded)
+
+        def put_temporal(envelope) -> None:
+            temporal_pg.append_event(conn, schema, envelope,
+                                     envelope.recorded_at)
+
+        def put_chunks(source_row, chunk_rows) -> None:
+            _put_explicit_chunks(conn, schema, source_row,
+                                 chunk_rows)
+
+        body({"put_record": put_record, "put_action": put_action,
+              "put_relation": put_relation,
+              "put_temporal": put_temporal,
+              "put_chunks": put_chunks})
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+    conn.commit()
+    conn.close()
+
+
+def _put_explicit_chunks(conn, schema: str, source_row,
+                         chunk_rows) -> None:
+    """Index one explicit record as an ordinary retrieval source
+    (same table, same FTS/vector pipeline, stable memory://explicit/
+    namespace). Runs inside the action transaction."""
+    from psycopg import sql as _sql
+
+    source_id, artifact_type, content_hash, timestamp = source_row
+    with conn.cursor() as cur:
+        cur.execute(
+            _sql.SQL(
+                "INSERT INTO {}.sources (source_id, artifact_type, "
+                "content_hash, timestamp) VALUES (%s, %s, %s, %s)"
+            ).format(_sql.Identifier(schema)),
+            (source_id, artifact_type, content_hash, timestamp),
+        )
+        for (chunk_id, chunk_source, ordinal, text, section,
+             char_start, char_end, chunk_hash, chunker,
+             emb_version, vector) in chunk_rows:
+            cur.execute(
+                _sql.SQL(
+                    "INSERT INTO {}.chunks (chunk_id, source_id, "
+                    "ordinal, text, section, char_start, char_end, "
+                    "content_hash, chunker, embedding_version, "
+                    "embedding, tsv) VALUES (%s, %s, %s, %s, %s, %s, "
+                    "%s, %s, %s, %s, %s, "
+                    "to_tsvector('english', %s))"
+                ).format(_sql.Identifier(schema)),
+                (chunk_id, chunk_source, ordinal, text, section,
+                 char_start, char_end, chunk_hash, chunker,
+                 emb_version, list(vector), text),
+            )
+
+
+def _ensure_write_ready(schema: str, project_dir: Path,
+                        canonical_dir: str) -> None:
+    """Fail closed before any write: schema initialised, project
+    identity intact, write tables present."""
+    if not schema_initialized(schema):
+        raise BridgeError(
+            "WRITE_STORE_NOT_READY",
+            "this project's remembering schema is not initialised; "
+            "run memory_setup before memory_remember.")
+    connection = raw_connect()
+    try:
+        from psycopg import sql as _sql
+
+        from remembering.write import postgres as write_pg
+
+        with connection.cursor() as cur:
+            cur.execute("SELECT key, value FROM {}.meta".format(
+                f'"{schema}"'))
+            meta = {row[0]: row[1] for row in cur.fetchall()}
+        recorded = meta.get("project.path")
+        if recorded is not None and recorded != canonical_dir:
+            raise BridgeError(
+                "SCHEMA_MISMATCH",
+                f"schema {schema!r} is already claimed by project "
+                f"{recorded!r}, but this project resolves to "
+                f"{canonical_dir!r}. Refusing to mix projects.")
+        ensure_temporal_objects(connection, schema)
+        write_pg.initialise(connection, schema)
+    finally:
+        connection.close()
+
+
+def do_remember(payload: dict[str, Any]) -> dict[str, Any]:
+    require_engine()
+    from remembering.write.service import perform_write
+
+    schema = schema_from(payload)
+    project_dir = project_directory_from(payload)
+    canonical_dir = canonical_project_dir(project_dir)
+    emb = embedding_spec_from(payload)
+    raw, attribution = parse_remember_spec(payload)
+    attribution = {**attribution, "project_id": schema}
+    if payload.get("idempotency_key") and \
+            not raw.get("idempotency_key"):
+        raw = {**raw,
+               "idempotency_key": payload["idempotency_key"]}
+    _ensure_write_ready(schema, project_dir, canonical_dir)
+    check_embedding(emb)
+    embedder = build_embedder(emb)
+    connection = raw_connect()
+    try:
+        deps = _write_pg_deps(connection, schema, project_dir,
+                              canonical_dir, embedder, schema)
+        result = perform_write(deps, raw, attribution)
+    finally:
+        connection.close()
+    result["schema"] = schema
+    return result
+
+
+def import_memory_events(connection, schema: str,
+                         project_dir: Path, embedder) -> dict:
+    """Deterministic import of operator-authored memory actions from
+    .remembering/memory/events.jsonl. Every line still passes schema
+    validation, project isolation, write authorization for the import
+    surface, and relationship validation: import is never an
+    authority bypass. Exact replays are idempotent duplicates."""
+    from remembering.write.service import perform_write
+
+    report: dict[str, Any] = {"discovered": 0, "authorized": 0,
+                              "imported": 0, "duplicates": 0,
+                              "denied": [], "failed": []}
+    path = Path(os.path.realpath(project_dir)) / MEMORY_EVENTS_REL
+    if not path.is_file():
+        return report
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        report["failed"].append(f"{path}: unreadable: {exc}")
+        return report
+    canonical_dir = canonical_project_dir(project_dir)
+    for lineno, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        report["discovered"] += 1
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            report["failed"].append(f"line {lineno}: not JSON: {exc}")
+            continue
+        if not isinstance(entry, dict):
+            report["failed"].append(
+                f"line {lineno}: must be an object")
+            continue
+        raw = {
+            "action": entry.get("action", "remember"),
+            "content": entry.get("content"),
+            "target_record_id": entry.get("target_record_id"),
+            "role": entry.get("role", "ordinary"),
+            "reason": entry.get("reason"),
+            "evidence_refs": entry.get("evidence_refs", []),
+            "effective_from": entry.get("effective_from"),
+            "event_time": entry.get("event_time"),
+            "idempotency_key": entry.get("idempotency_key"),
+        }
+        scope = entry.get("caller_scope", "import")
+        if not isinstance(scope, str) or not scope.strip():
+            report["failed"].append(
+                f"line {lineno}: caller_scope must be a string")
+            continue
+        actor_id = entry.get("actor_id", "")
+        if not isinstance(actor_id, str):
+            report["failed"].append(
+                f"line {lineno}: actor_id must be a string")
+            continue
+        attribution = {
+            "project_id": schema,
+            "surface": "import",
+            "caller_scope": scope.strip(),
+            "actor_kind": "import",
+            "actor_id": actor_id.strip(),
+            "host_session_id": "",
+            "host_tool_call_id": "",
+            "idempotency_key": None,
+        }
+        try:
+            deps = _write_pg_deps(connection, schema, project_dir,
+                                  canonical_dir, embedder, schema)
+            out = perform_write(deps, raw, attribution)
+        except Exception as exc:
+            report["failed"].append(
+                f"line {lineno}: {type(exc).__name__}:"
+                f"{str(exc)[:160]}")
+            continue
+        if out.get("ok"):
+            report["authorized"] += 1
+            if out.get("duplicate"):
+                report["duplicates"] += 1
+            else:
+                report["imported"] += 1
+        else:
+            report["denied"].append(
+                f"line {lineno}: {out.get('code')}:"
+                f"{out.get('reason')}")
+    return report
+
+
+def annotate_explicit_metadata(items: list[dict],
+                               schema: str) -> None:
+    """Search stays broad: explicit-memory results gain structured
+    annotations (role, ceiling, attribution, lifecycle successors).
+    Nothing is hidden; failures degrade to unannotated items."""
+    try:
+        from remembering.write import postgres as write_pg
+
+        sources = [i["source_id"] for i in items
+                   if isinstance(i.get("source_id"), str)
+                   and i["source_id"].startswith(
+                       "memory://explicit/")]
+        if not sources:
+            return
+        connection = raw_connect()
+        try:
+            attributes = write_pg.source_attributes(
+                connection, schema, sources)
+            relations = write_pg.all_relations(connection, schema)
+        finally:
+            connection.close()
+        successors: dict[str, list] = {}
+        for relation in relations:
+            successors.setdefault(
+                relation["target_record_id"], []).append({
+                    "record_id": relation["source_record_id"],
+                    "relation": relation["relation"],
+                    "action_id": relation["action_id"],
+                    "effective_from": relation["effective_from"],
+                    "recorded_at": relation["recorded_at"]})
+        for item in items:
+            attrs = attributes.get(item["source_id"])
+            if attrs is None:
+                continue
+            item["explicit_memory"] = {
+                "record_id": attrs["record_id"],
+                "role": attrs["role"],
+                "standing_ceiling": attrs["standing_ceiling"],
+                "actor_kind": None,
+                "lineage_root": attrs["lineage_root"],
+                "created_by_action": attrs["created_by_action"],
+                "successors": successors.get(attrs["record_id"],
+                                             []),
+            }
+    except Exception:
+        pass
+
+
+def load_write_overlay(schema: str) -> dict[str, Any]:
+    """Canonical explicit records plus derived relations for the
+    read path. Missing tables mean no explicit memory yet: empty
+    overlay, never a failure."""
+    from remembering.write import postgres as write_pg
+
+    try:
+        connection = raw_connect()
+        try:
+            records = {r.record_id: r for r in
+                       write_pg.all_records(connection, schema)}
+            relations = write_pg.all_relations(connection, schema)
+        finally:
+            connection.close()
+    except Exception:
+        records, relations = {}, []
+    return {"records": records, "relations": relations}
+
+
+def do_write_eval(payload: dict[str, Any]) -> dict[str, Any]:
+    require_engine()
+    from remembering.write.evaluation import evaluate_write
+
+    report = evaluate_write()
+    out = {"ok": report["passed"], "schema": "",
+           "contract_categories": report["contract_categories"],
+           "eval_version": report["eval_version"],
+           "checks_total": report["checks_total"],
+           "checks_passed": report["checks_passed"],
+           "categories": report["categories"],
+           "passed": report["passed"]}
+    try:
+        out["schema"] = schema_from(payload)
+    except BridgeError:
+        pass
+    return out
+
+
+def do_write_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild derived write projections from canonical records and
+    actions: retrieval rows, relationship edges, and the temporal
+    overlay. Canonical IDs never change; the rebuild reports
+    equivalence or fails visibly."""
+    require_engine()
+    import hashlib as _hashlib
+
+    from remembering.temporal import postgres as temporal_pg
+    from remembering.temporal.reducer import projection_digest, replay
+    from remembering.temporal.ordering import temporal_sort
+    from remembering.write import postgres as write_pg
+    from remembering.write.service import chunk_id_for
+    from remembering.write.temporal import envelope_for_action
+
+    schema = schema_from(payload)
+    project_dir = project_directory_from(payload)
+    canonical_dir = canonical_project_dir(project_dir)
+    emb = embedding_spec_from(payload)
+    _ensure_write_ready(schema, project_dir, canonical_dir)
+    check_embedding(emb)
+    embedder = build_embedder(emb)
+    probe = embedder.embed(["dimension probe"])
+    connection = raw_connect()
+    try:
+        records = write_pg.all_records(connection, schema)
+        actions = sorted(
+            _write_all_actions(connection, schema),
+            key=lambda e: (e.recorded_at, e.action_id))
+        log_before = temporal_pg.load_log(connection, schema)
+        digest_before = projection_digest(
+            replay(temporal_sort(log_before.events(),
+                                 log_before.by_id())))
+        record_ids_before = sorted(r.record_id for r in records)
+        action_ids_before = sorted(e.action_id for e in actions)
+        relation_ids_before = sorted(
+            (r["source_record_id"], r["target_record_id"],
+             r["relation"]) for r in
+            write_pg.all_relations(connection, schema))
+    finally:
+        connection.close()
+    # External embedding first; the destructive step stays inside
+    # one transaction afterwards.
+    vectors: dict[str, list[float]] = {}
+    for record in records:
+        produced = embedder.embed([record.content])
+        if not produced.vectors or not produced.vectors[0]:
+            raise BridgeError("WRITE_INDEX_FAILED",
+                              "rebuild embedding produced no vector; "
+                              "derived projections untouched.")
+        vectors[record.record_id] = list(produced.vectors[0])
+    emb_version = embedder.version()
+    by_action = {e.action_id: e for e in actions}
+    tx = raw_connect()
+    old_autocommit = tx.autocommit
+    tx.autocommit = False
+    try:
+        from psycopg import sql as _sql
+
+        with tx.cursor() as cur:
+            cur.execute(
+                _sql.SQL("DELETE FROM "
+                         "{}.explicit_memory_relations").format(
+                    _sql.Identifier(schema)))
+            cur.execute(
+                _sql.SQL("DELETE FROM {}.chunks WHERE source_id LIKE "
+                         "'memory://explicit/%'").format(
+                    _sql.Identifier(schema)))
+            cur.execute(
+                _sql.SQL("DELETE FROM {}.sources WHERE source_id LIKE "
+                         "'memory://explicit/%'").format(
+                    _sql.Identifier(schema)))
+            cur.execute(
+                _sql.SQL("DELETE FROM {}.temporal_events WHERE "
+                         "subject LIKE 'explicit-memory:%' OR "
+                         "source_id LIKE 'memory://explicit/%'"
+                         ).format(_sql.Identifier(schema)))
+        derived = write_pg.derive_relations(
+            [e.to_dict() for e in actions])
+        for item in derived:
+            write_pg.insert_relation(
+                tx, schema, item["source_record_id"],
+                item["target_record_id"], item["relation"],
+                item["action_id"], item["effective_from"],
+                item["recorded_at"])
+        seq_by_source: dict[str, int] = {}
+        for record in sorted(records,
+                             key=lambda r: (r.recorded_at,
+                                            r.record_id)):
+            chunk_id = chunk_id_for(record.source_id,
+                                    record.content)
+            _put_explicit_chunks(
+                tx, schema,
+                (record.source_id, "explicit-memory",
+                 record.content_hash, record.recorded_at),
+                [(chunk_id, record.source_id, 0, record.content,
+                  None, 0, len(record.content),
+                  record.content_hash, "explicit-memory-v0.1",
+                  emb_version, vectors[record.record_id])])
+        for event in actions:
+            record = next(
+                (r for r in records
+                 if r.record_id == event.new_record_id), None)
+            lineage = (record.lineage_root if record is not None
+                       else "")
+            if not lineage and event.target_record_id:
+                target = next(
+                    (r for r in records
+                     if r.record_id == event.target_record_id),
+                    None)
+                lineage = target.lineage_root if target is not None \
+                    else ""
+            prior = None
+            if event.relation in ("corrects", "supersedes") and \
+                    event.target_record_id:
+                target = next(
+                    (r for r in records
+                     if r.record_id == event.target_record_id),
+                    None)
+                if target is not None:
+                    creating = by_action.get(
+                        target.created_by_action)
+                    from remembering.write.service import \
+                        target_event_id as _target_event
+
+                    prior = _target_event(target, creating)
+            source_id = (record.source_id if record is not None
+                         else f"memory://explicit/"
+                         f"{event.target_record_id or ''}")
+            seq_by_source[source_id] = seq_by_source.get(
+                source_id, 0) + 1
+            envelope = envelope_for_action(
+                record, event, lineage, prior,
+                seq_by_source[source_id])
+            temporal_pg.append_event(tx, schema, envelope,
+                                     envelope.recorded_at)
+        tx.commit()
+    except Exception:
+        tx.rollback()
+        tx.close()
+        raise
+    tx.close()
+    connection = raw_connect()
+    try:
+        records_after = write_pg.all_records(connection, schema)
+        log_after = temporal_pg.load_log(connection, schema)
+        digest_after = projection_digest(
+            replay(temporal_sort(log_after.events(),
+                                 log_after.by_id())))
+        equivalent = (
+            sorted(r.record_id for r in records_after) ==
+            record_ids_before
+            and digest_before == digest_after
+            and sorted(
+                (r["source_record_id"], r["target_record_id"],
+                 r["relation"]) for r in
+                write_pg.all_relations(connection, schema)) ==
+            relation_ids_before)
+    finally:
+        connection.close()
+    return {"ok": equivalent, "schema": schema,
+            "records": len(record_ids_before),
+            "actions": len(action_ids_before),
+            "relations": len(relation_ids_before),
+            "projection_digest": digest_after,
+            "equivalent": equivalent,
+            "embedding": emb_version,
+            "message": ("rebuild equivalent"
+                        if equivalent else
+                        "REBUILD_DIVERGED: derived state differs "
+                        "from canonical history")}
+
+
+def _write_all_actions(connection, schema: str) -> list:
+    from psycopg import sql as _sql
+
+    from remembering.write import postgres as write_pg
+
+    with connection.cursor() as cur:
+        cur.execute(
+            _sql.SQL(
+                f"SELECT {write_pg.ACTION_COLUMNS} "
+                "FROM {}.memory_action_events "
+                "ORDER BY ingest_seq").format(
+                _sql.Identifier(schema)))
+        columns = [d.name for d in cur.description]
+        return [write_pg._action_from_row(dict(zip(columns, row)))
+                for row in cur.fetchall()]
+
+
+def do_record_show(payload: dict[str, Any]) -> dict[str, Any]:
+    require_engine()
+    from remembering.write import postgres as write_pg
+
+    schema = schema_from(payload)
+    record_id = payload.get("record_id")
+    if not isinstance(record_id, str) or not record_id.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "record_show requires record_id")
+    connection = raw_connect()
+    try:
+        record = write_pg.get_record(connection, schema,
+                                     record_id.strip())
+        if record is None:
+            return {"ok": False, "schema": schema,
+                    "message": "WRITE_TARGET_NOT_FOUND"}
+        actions = write_pg.actions_for_record(
+            connection, schema, record.record_id)
+        successors = write_pg.successors_of(
+            connection, schema, record.record_id)
+        outgoing = write_pg.relations_from(
+            connection, schema, record.record_id)
+    finally:
+        connection.close()
+    return {"ok": True, "schema": schema,
+            "record": record.to_dict(),
+            "actions": [a.to_dict() for a in actions],
+            "successors": successors, "outgoing": outgoing}
+
+
+def do_action_show(payload: dict[str, Any]) -> dict[str, Any]:
+    require_engine()
+    from remembering.write import postgres as write_pg
+
+    schema = schema_from(payload)
+    action_id = payload.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "action_show requires action_id")
+    connection = raw_connect()
+    try:
+        event = write_pg.get_action(connection, schema,
+                                    action_id.strip())
+        if event is None:
+            return {"ok": False, "schema": schema,
+                    "message": "WRITE_ACTION_NOT_FOUND"}
+        record = None
+        if event.new_record_id:
+            record = write_pg.get_record(connection, schema,
+                                         event.new_record_id)
+    finally:
+        connection.close()
+    return {"ok": True, "schema": schema,
+            "action": event.to_dict(),
+            "record": record.to_dict() if record else None}
+
+
+def do_write_history(payload: dict[str, Any]) -> dict[str, Any]:
+    """Developer inspection of one explicit-memory lineage: the
+    record, what created it, and the chain it belongs to."""
+    require_engine()
+    from remembering.write import postgres as write_pg
+
+    schema = schema_from(payload)
+    record_id = payload.get("record_id")
+    if not isinstance(record_id, str) or not record_id.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          "write_history requires record_id")
+    connection = raw_connect()
+    try:
+        record = write_pg.get_record(connection, schema,
+                                     record_id.strip())
+        if record is None:
+            return {"ok": False, "schema": schema,
+                    "message": "WRITE_TARGET_NOT_FOUND"}
+        lineage = [r for r in write_pg.all_records(
+            connection, schema)
+            if r.lineage_root == record.lineage_root]
+        relations = [r for r in write_pg.all_relations(
+            connection, schema)
+            if r["target_record_id"] in
+            {r.record_id for r in lineage}
+            or r["source_record_id"] in
+            {r.record_id for r in lineage}]
+    finally:
+        connection.close()
+    chain = sorted(lineage,
+                   key=lambda r: (r.recorded_at, r.record_id))
+    return {"ok": True, "schema": schema,
+            "lineage_root": record.lineage_root,
+            "records": [r.to_dict() for r in chain],
+            "relations": relations}
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(
             "usage: remembering_bridge.py "
             "<doctor|setup|refresh|search|context|capture_session|"
             "route_eval|temporal_import|state|temporal_eval|frame_eval|"
-            "trust_import|trust_eval|selection_eval|trace|trace_eval>")
+            "trust_import|trust_eval|selection_eval|trace|trace_eval|" "loops|loop_eval|loop_rebuild|loop_create|loop_import|" "remember|write_eval|write_rebuild|record_show|" "action_show|write_history>")
     action = sys.argv[1]
     payload = read_payload()
 
@@ -4312,6 +5325,18 @@ def main() -> None:
         result = do_loop_create(payload)
     elif action == "loop_import":
         result = do_loop_import(payload)
+    elif action == "remember":
+        result = do_remember(payload)
+    elif action == "write_eval":
+        result = do_write_eval(payload)
+    elif action == "write_rebuild":
+        result = do_write_rebuild(payload)
+    elif action == "record_show":
+        result = do_record_show(payload)
+    elif action == "action_show":
+        result = do_action_show(payload)
+    elif action == "write_history":
+        result = do_write_history(payload)
     else:
         raise BridgeError("CONFIG_INVALID",
                           f"unknown bridge action: {action}")

@@ -86,6 +86,25 @@
 > creates loops; claims never close them alone. No scheduler, no
 > scores, no consolidation, no learning.
 
+> Status 2026-09-24 (later still): **Stage 9 (explicit memory
+> actions) is implemented and verified live.** One agent tool
+> (`memory_remember`: remember/correct/supersede/retract) appends
+> attributed immutable records plus append-only action events under
+> `.remembering/write-policy.json` (conservative builtin: ordinary
+> remember only, capped at untrusted, no relationships, no
+> backdating). Two-key standing holds end to end: the write policy
+> assigns at most a ceiling and Stage 5 stays final (explicit
+> poison persists as history but is denied at trust admission).
+> Corrections/supersessions/retractions preserve target bytes,
+> resolve through a relationship overlay reusing Stage 3 reasons,
+> and are immediately searchable under `memory://explicit/`.
+> Contract: 30 categories / 44 checks green (`write-eval`);
+> Bun 47/47, engine 16/16, bridge 123/123 (99 prior + 24 new),
+> build green, 78-file package, all 8 packed evals green from a
+> scrubbed C:/, live PG + pgvector + bge-m3 remember/correct/
+> retract/poison sequence green. The next implementation stage is
+> Stage 10 (matched behavioral evaluation) — do not implement it yet.
+
 This repository has been bootstrapped far enough for OpenCode to take over implementation.
 
 The architectural decision is now fixed:

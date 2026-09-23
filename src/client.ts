@@ -93,6 +93,32 @@ export type HealthReport = {
     unresolved_evidence_refs: string[];
     error?: string;
   };
+  writes: {
+    write_engine_version: string;
+    store_version: string | null;
+    record_schema_version: string;
+    action_schema_version: string;
+    relation_version: string;
+    ready: boolean;
+    policy: {
+      configured: boolean;
+      valid: boolean;
+      version: string | null;
+      digest: string | null;
+      source: string;
+      error: string | null;
+    };
+    record_count: number;
+    action_count: number;
+    remember_count: number;
+    correct_count: number;
+    supersede_count: number;
+    retract_count: number;
+    relationship_count: number;
+    unresolved_index_records: string[];
+    last_action_at: string | null;
+    error?: string;
+  };
   selection: {
     select_engine_version: string;
     policy_version: string;
@@ -481,6 +507,9 @@ const TIMEOUTS_MS: Record<string, number> = {
   state: 60_000,
   route_eval: 60_000,
   temporal_eval: 60_000,
+  remember: 300_000,
+  write_eval: 120_000,
+  write_rebuild: 1_200_000,
 };
 
 function validateTrustRequest(trust: TrustRequest): void {
@@ -501,6 +530,114 @@ function validateSelectionRequest(selection: SelectionRequest): void {
     throw new Error(
       `Invalid selection mode ${JSON.stringify(selection.mode)}: expected 'decisive' or 'full'.`,
     );
+  }
+}
+
+export type RememberAction = "remember" | "correct" | "supersede" | "retract";
+
+export type RememberRole =
+  | "ordinary"
+  | "evidence"
+  | "proposal"
+  | "preference"
+  | "decision"
+  | "production_state";
+
+export type RememberRequest = {
+  action?: RememberAction;
+  content?: string;
+  target_record_id?: string;
+  role?: RememberRole;
+  reason?: string;
+  evidence_refs?: string[];
+  effective_from?: string;
+  event_time?: string;
+  idempotency_key?: string;
+  caller_scope?: string;
+  origin?: "opencode" | "cli";
+};
+
+export type RememberResult = {
+  ok: boolean;
+  code?: string;
+  reason?: string;
+  action_id?: string;
+  action?: string;
+  record_id?: string | null;
+  target_record_id?: string | null;
+  duplicate?: boolean;
+  authorization?: {
+    verdict: string;
+    reason: string;
+    policy_version: string;
+    policy_digest: string;
+    matched_grant_id: string | null;
+  };
+  record?: {
+    role: string;
+    standing_ceiling: string;
+    source_id: string;
+    lineage_root: string;
+  } | null;
+  index?: { indexed: boolean; chunks: number; embedded: number };
+  relation?: { type: string; target_record_id: string } | null;
+  latencies_ms?: Record<string, number>;
+  schema?: string;
+  message?: string;
+};
+
+export type WriteEvaluation = {
+  ok: boolean;
+  contract_categories: number;
+  eval_version: string;
+  checks_total: number;
+  checks_passed: number;
+  categories: Record<
+    string,
+    { correct: number; total: number; failures: string[] }
+  >;
+  passed: boolean;
+};
+
+const REMEMBER_ACTIONS: RememberAction[] = [
+  "remember",
+  "correct",
+  "supersede",
+  "retract",
+];
+
+const REMEMBER_ROLES: RememberRole[] = [
+  "ordinary",
+  "evidence",
+  "proposal",
+  "preference",
+  "decision",
+  "production_state",
+];
+
+function validateRememberRequest(request: RememberRequest): void {
+  const action = request.action ?? "remember";
+  if (!REMEMBER_ACTIONS.includes(action)) {
+    throw new Error(
+      `Invalid remember action ${JSON.stringify(request.action)}: expected 'remember', 'correct', 'supersede' or 'retract'.`,
+    );
+  }
+  if (request.role !== undefined && !REMEMBER_ROLES.includes(request.role)) {
+    throw new Error(
+      `Invalid remember role ${JSON.stringify(request.role)}.`,
+    );
+  }
+  if (
+    request.caller_scope !== undefined &&
+    !request.caller_scope.trim()
+  ) {
+    throw new Error("remember caller_scope must be a non-empty string.");
+  }
+  if (
+    request.evidence_refs !== undefined &&
+    !Array.isArray(request.evidence_refs)
+  ) {
+    throw new Error("remember evidence_refs must be a list.");
   }
 }
 
@@ -848,6 +985,58 @@ export class ProjectMemoryClient {
 
   routeEval(): Promise<RouteEvalResult> {
     return this.call<RouteEvalResult>("route_eval");
+  }
+
+  async remember(request: RememberRequest = {}): Promise<RememberResult> {
+    validateRememberRequest(request);
+    return this.call<RememberResult>("remember", {
+      action: request.action ?? "remember",
+      content: request.content,
+      target_record_id: request.target_record_id,
+      role: request.role ?? "ordinary",
+      reason: request.reason,
+      evidence_refs: request.evidence_refs ?? [],
+      effective_from: request.effective_from,
+      event_time: request.event_time,
+      idempotency_key: request.idempotency_key,
+      caller_scope: request.caller_scope ?? "default",
+      origin: request.origin ?? "opencode",
+    });
+  }
+
+  writeEval(): Promise<WriteEvaluation> {
+    return this.call<WriteEvaluation>("write_eval");
+  }
+
+  writeRebuild(): Promise<Record<string, unknown>> {
+    return this.call<Record<string, unknown>>("write_rebuild");
+  }
+
+  async recordShow(recordId: string): Promise<Record<string, unknown>> {
+    if (!recordId.trim()) {
+      throw new Error("recordShow requires record_id.");
+    }
+    return this.call<Record<string, unknown>>("record_show", {
+      record_id: recordId,
+    });
+  }
+
+  async actionShow(actionId: string): Promise<Record<string, unknown>> {
+    if (!actionId.trim()) {
+      throw new Error("actionShow requires action_id.");
+    }
+    return this.call<Record<string, unknown>>("action_show", {
+      action_id: actionId,
+    });
+  }
+
+  async writeHistory(recordId: string): Promise<Record<string, unknown>> {
+    if (!recordId.trim()) {
+      throw new Error("writeHistory requires record_id.");
+    }
+    return this.call<Record<string, unknown>>("write_history", {
+      record_id: recordId,
+    });
   }
 
   captureSession(

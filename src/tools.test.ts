@@ -121,6 +121,31 @@ const HEALTH: HealthReport = {
     uncertain: 0,
     unresolved_evidence_refs: [],
   },
+  writes: {
+    write_engine_version: "write-engine-v0.1",
+    store_version: "memory-action-store-v0.1",
+    record_schema_version: "explicit-memory-record-v0.1",
+    action_schema_version: "memory-action-v0.1",
+    relation_version: "memory-relation-v0.1",
+    ready: true,
+    policy: {
+      configured: false,
+      valid: true,
+      version: "builtin-writes-v0.1",
+      digest: "builtin",
+      source: "builtin_default",
+      error: null,
+    },
+    record_count: 0,
+    action_count: 0,
+    remember_count: 0,
+    correct_count: 0,
+    supersede_count: 0,
+    retract_count: 0,
+    relationship_count: 0,
+    unresolved_index_records: [],
+    last_action_at: null,
+  },
 };
 
 describe("memory tools", () => {
@@ -643,8 +668,7 @@ describe("memory tools", () => {
     ).rejects.toThrow("state");
   });
 
-  test("memory_trace rejects invalid modes client-side", async () => {
-    const { ProjectMemoryClient } = await import("./client");
+  test("memory_trace rejects invalid modes client-side", async () => {    const { ProjectMemoryClient } = await import("./client");
     const client = new ProjectMemoryClient(
       {
         dsn: "postgresql://localhost:5432/x",
@@ -677,5 +701,77 @@ describe("memory tools", () => {
     await expect(
       client.trace({ mode: "diff", trace_id: "ctx_a", diff_with: "  " }),
     ).rejects.toThrow("diff_with");
+  });
+
+  test("memory_remember returns the structured write result", async () => {
+    const { MemoryRemember } = await import("./tools");
+    const remembered = {
+      ok: true,
+      action_id: "mact_abc",
+      action: "remember",
+      record_id: "mem_abc",
+      target_record_id: null,
+      duplicate: false,
+      authorization: {
+        verdict: "allow",
+        reason: "write.allow.builtin_untrusted_remember",
+        policy_version: "builtin-writes-v0.1",
+        policy_digest: "builtin",
+        matched_grant_id: "builtin-untrusted-remember",
+      },
+      record: {
+        role: "ordinary",
+        standing_ceiling: "untrusted",
+        source_id: "memory://explicit/mem_abc",
+        lineage_root: "mem_abc",
+      },
+      index: { indexed: true, chunks: 1, embedded: 1 },
+      relation: null,
+    };
+    const tool = MemoryRemember(
+      fakeClient({ remember: async () => remembered }),
+    );
+    expect(tool.name).toBe("memory_remember");
+    const out = await tool.execute!(
+      { action: "remember", content: "hello" } as never,
+      {} as never,
+    );
+    const parsed = JSON.parse((out as { content: string }).content);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.record.standing_ceiling).toBe("untrusted");
+    expect(parsed.authorization.reason).toBe(
+      "write.allow.builtin_untrusted_remember",
+    );
+  });
+
+  test("memory_remember validates action and role client-side", async () => {
+    const { ProjectMemoryClient } = await import("./client");
+    const client = new ProjectMemoryClient(
+      {
+        dsn: "postgresql://localhost:5432/x",
+        python: "python",
+        schema: "remembering_abc",
+        bridgePath: "bridge/remembering_bridge.py",
+        embedding: { provider: "ollama", model: "bge-m3", host: "x" },
+        retrieval: {
+          mode: "hybrid",
+          lexicalK: 1,
+          denseK: 1,
+          fusionK: 60,
+          rerankK: 1,
+          reranker: "none",
+        },
+        context: { autoInject: false, maxChars: 4000, maxResults: 6 },
+      },
+      process.cwd(),
+    );
+    await expect(
+      client.remember({ action: "forget" as never }),
+    ).rejects.toThrow("action");
+    await expect(
+      client.remember({ action: "remember", role: "owner" as never }),
+    ).rejects.toThrow("role");
+    await expect(client.recordShow("  ")).rejects.toThrow("record_id");
+    await expect(client.actionShow("  ")).rejects.toThrow("action_id");
   });
 });

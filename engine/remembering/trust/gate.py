@@ -51,7 +51,9 @@ class TrustContext:
                  known_sources: set[str] | None = None,
                  project_id: str = "",
                  caller_scope: str = "default",
-                 level: str = "FULL") -> None:
+                 level: str = "FULL",
+                 standing_override: dict[str, str] | None = None,
+                 write_ceiling: dict[str, str] | None = None) -> None:
         if level not in LEVELS:
             raise ValueError(f"TRUST_INVALID_LEVEL:{level!r}")
         self.policy = policy
@@ -63,7 +65,34 @@ class TrustContext:
         self.project_id = project_id
         self.caller_scope = caller_scope
         self.level = level
+        # Two-key standing (Stage 9): explicit-memory sources carry a
+        # write-policy ceiling that caps the trust-resolved class.
+        # Empty for all ordinary sources: their behavior is unchanged.
+        self.standing_override = dict(standing_override or {})
+        self.write_ceiling = dict(write_ceiling or {})
         self._roots: dict[str, frozenset[str]] = {}
+
+    def class_of(self, source_id: str) -> tuple[str, str | None]:
+        """Resolved (policy_class, write_ceiling|None). The caller
+        combines them with the two-key minimum; the gate resolves the
+        effective class through effective_of."""
+        from .policy import match_rule
+
+        rule, _ = match_rule(self.policy, source_id)
+        policy_class = (rule.source_class if rule is not None
+                        else self.policy.default_source_class)
+        return policy_class, self.write_ceiling.get(source_id)
+
+    def effective_of(self, source_id: str) -> tuple[str, str, str | None]:
+        """(effective_class, policy_class, ceiling). Without a ceiling
+        the effective class is the policy class (frozen behavior)."""
+        policy_class, ceiling = self.class_of(source_id)
+        if ceiling is None:
+            return policy_class, policy_class, None
+        from remembering.write.model import effective_class
+
+        return (effective_class(policy_class, ceiling), policy_class,
+                ceiling)
 
     def roots_of(self, source_id: str) -> frozenset[str]:
         if source_id not in self._roots:
@@ -147,14 +176,20 @@ def _base_verdict(candidate: TrustCandidate,
         from .policy import match_rule
 
         rule, _ = match_rule(policy, candidate.source_id)
-        source_class = (rule.source_class if rule is not None
-                        else policy.default_source_class)
+        effective, policy_class, ceiling = ctx.effective_of(
+            candidate.source_id)
+        source_class = effective
         role = rule.role if rule is not None else candidate.role
+        ceiling_note = (f" trust_policy_class={policy_class} "
+                        f"write_ceiling={ceiling} "
+                        f"effective={effective}"
+                        if ceiling is not None else "")
         if source_class == "untrusted":
             return _record(candidate, Verdict.DENY, R_DENY_UNTRUSTED,
                            "standing",
                            f"source class untrusted"
-                           f"{f' (rule {rule.id})' if rule else ''}")
+                           f"{f' (rule {rule.id})' if rule else ''}"
+                           f"{ceiling_note}")
         if role in NON_GUIDING_ROLES:
             return _record(candidate, Verdict.DENY, R_DENY_NON_GUIDING,
                            "kind_authority",
@@ -171,11 +206,8 @@ def _base_verdict(candidate: TrustCandidate,
     # non-authoritative class cannot settle; quarantine it.
     screen = screen_instruction(candidate.text)
     if screen["directive_like"] and ctx.level == "S1":
-        from .policy import match_rule as _match
-
-        rule, _ = _match(policy, candidate.source_id)
-        cls = (rule.source_class if rule is not None
-               else policy.default_source_class)
+        effective, _, _ = ctx.effective_of(candidate.source_id)
+        cls = effective
         if cls != "authoritative":
             return _record(candidate, Verdict.QUARANTINE,
                            R_QUARANTINE_POISON, "instruction_naive",
@@ -195,8 +227,8 @@ def _resolve_peer_dependent(candidate: TrustCandidate,
     from .policy import match_rule
 
     rule, _ = match_rule(policy, candidate.source_id)
-    source_class = (rule.source_class if rule is not None
-                    else policy.default_source_class)
+    effective, _, _ = ctx.effective_of(candidate.source_id)
+    source_class = effective
     role = rule.role if rule is not None else candidate.role
     screen = screen_instruction(candidate.text)
     authoritative = source_class == "authoritative"
@@ -278,18 +310,15 @@ def _refuter_present(ref_source: str, by_id: dict,
 
 def _refuter_admits(ref_source: str, by_id: dict,
                     base_by_id: dict, ctx: TrustContext) -> bool:
-    from .policy import match_rule as _match
-
     for unit_id, candidate in by_id.items():
         if candidate.source_id != ref_source:
             continue
         record = base_by_id.get(unit_id)
         if record is None or record.verdict is Verdict.DENY:
             continue
-        rule, _ = _match(ctx.policy, candidate.source_id)
-        cls = (rule.source_class if rule is not None
-               else ctx.policy.default_source_class)
-        if cls == "authoritative" and candidate.source_id not in ctx.revoked:
+        effective, _, _ = ctx.effective_of(candidate.source_id)
+        if effective == "authoritative" and \
+                candidate.source_id not in ctx.revoked:
             return True
     return False
 

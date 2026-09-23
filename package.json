@@ -37,6 +37,9 @@
     "loop-health": "bun src/dev-cli.ts loop-health",
     "loop-import": "bun src/dev-cli.ts loop-import",
     "loop-eval": "bun src/dev-cli.ts loop-eval",
+    "write-health": "bun src/dev-cli.ts write-health",
+    "write-eval": "bun src/dev-cli.ts write-eval",
+    "write-rebuild": "bun src/dev-cli.ts write-rebuild",
     "bridge-tests": "python -m pytest bridge/ -v"
   },
   "dependencies": {

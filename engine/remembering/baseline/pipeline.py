@@ -107,6 +107,11 @@ class Baseline:
             else:
                 report.changed += 1
         for source_id in sorted(set(known) - seen):
+            # Explicit-memory sources are managed by the write
+            # subsystem, not by repository discovery: refresh must
+            # never prune them for not being files on disk.
+            if source_id.startswith("memory://"):
+                continue
             self.store.remove_source(source_id)
             report.removed += 1
         self.store.ensure_hnsw()

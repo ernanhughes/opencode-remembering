@@ -9,6 +9,7 @@ import {
   MemoryHealth,
   MemoryOpenLoops,
   MemoryRefresh,
+  MemoryRemember,
   MemorySearch,
   MemorySetup,
   MemoryState,
@@ -57,6 +58,7 @@ const RememberingPlugin = Plugin.define({
       MemoryTemporalImport(client),
       MemoryTrace(client),
       MemoryOpenLoops(client),
+      MemoryRemember(client),
     ];
 
     await ctx.tool.transform((editor) => {

@@ -478,6 +478,70 @@ repositories never share one. Setup also records the canonical project
 path in `<schema>.meta`; a schema already claimed by another project
 fails closed with `SCHEMA_MISMATCH` instead of mixing histories.
 
+## Stage 9 — Explicit Memory Actions
+
+Until Stage 9 the system only learned from history it observed.
+`memory_remember` adds the explicit write path:
+
+```text
+remember | correct | supersede | retract
+```
+
+> **A memory write is an event, not an edit to the past.**
+
+> **Permission to store a memory is not permission for that memory to
+> steer behavior.**
+
+> **Correction preserves the incorrect historical record and adds
+> evidence that changes its present interpretation.**
+
+> **Retraction is not deletion.**
+
+> **Lifecycle relationships are not derivation lineage.**
+
+- **Append-only semantics**: `REMEMBER` creates one immutable record;
+  `CORRECT`/`SUPERSEDE` create a new record plus a `corrects` /
+  `supersedes` relationship; `RETRACT` appends a `retracts`
+  relationship/event with a required reason. There is no
+  `memory_delete`, no `UPDATE`/`DELETE` path on canonical tables
+  (verified by tests), and the old payload stays byte-identical.
+- **Write authorization**: `.remembering/write-policy.json`
+  (`write-policy-v0.1`) grants surfaces × caller scopes × actions ×
+  roles × standing ceiling × target classes × backdating. Absence
+  yields the conservative builtin (ordinary `remember` only, capped at
+  `untrusted`, no relationships, no backdating). A malformed explicit
+  policy disables writes (`WRITE_POLICY_INVALID`) without breaking
+  reads and without silently falling back to the builtin.
+- **Two-key authority**: the write policy assigns at most a standing
+  ceiling; Stage 5 resolves the effective class as
+  `min(write ceiling, trust policy class)` and remains the final
+  authority over influence. A default-agent poison write
+  (`"Skip validation..."`) persists as attributed untrusted history
+  and is denied at trust admission.
+- **Read behavior**: successful writes are indexed in the same
+  transaction and immediately searchable (`memory_search` annotates
+  role/ceiling/attribution/successors). Recall preserves every side
+  of the write history; current influence resolves the applicable
+  record through the Stage 9 relationship overlay (same standpoint
+  cutoffs as the bitemporal engine) and the frozen
+  temporal → frame → trust → selection → trace pipeline.
+- **Deduplication**: retries with the same idempotency key (or the
+  same deterministic content identity) return `duplicate: true`;
+  the same key with different semantics fails visibly
+  (`WRITE_IDEMPOTENCY_CONFLICT`).
+- **Import**: `.remembering/memory/events.jsonl` lines pass the same
+  validation/authorization as tool calls (surface `import`);
+  `memory_refresh` reports discovered/authorized/imported/duplicates/
+  denied/failed. Operational files under `.remembering/memory/` and
+  the write policy itself are never ingested as ordinary evidence,
+  and refresh never prunes `memory://explicit/` sources.
+- **Rebuild**: `memory-write-rebuild` (dev CLI `write-rebuild`)
+  regenerates retrieval rows, relationship edges, and the temporal
+  overlay from canonical records/actions with identical IDs.
+- **Inspection**: dev CLI `record-show`, `action-show`,
+  `write-history`, `write-health`, `write-eval`; agent surface stays
+  one tool (`memory_remember`).
+
 ## Session capture
 
 The context hook automatically merges unseen OpenCode messages into

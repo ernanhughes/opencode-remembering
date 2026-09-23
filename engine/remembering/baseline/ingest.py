@@ -31,11 +31,14 @@ SKIP_DIRS = {
     "dist", "build", "coverage", "target", ".next", ".turbo",
 }
 # Operational memory-system files are never ordinary evidence:
-# loop event files and trace exports live here, while canonical
-# session history under .remembering/sessions/ stays ingestible.
+# loop event files, trace exports, and explicit-memory action files
+# live here, while canonical session history under
+# .remembering/sessions/ stays ingestible.
 SKIP_PATHS = (
     (".remembering", "loops"),
     (".remembering", "traces"),
+    (".remembering", "memory"),
+    (".remembering", "write-policy.json"),
 )
 
 

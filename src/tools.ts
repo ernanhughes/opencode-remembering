@@ -3,6 +3,7 @@ import type { Info as ToolInfo } from "@opencode/plugin/promise/tool";
 import type {
   LoopRequest,
   ProjectMemoryClient,
+  RememberRequest,
   RouteRequest,
   SelectionRequest,
   TemporalStandpointRequest,
@@ -272,6 +273,52 @@ export function MemoryOpenLoops(client: ProjectMemoryClient): ToolInfo {
         transition_kind: args.transition_kind,
         limit: args.limit,
       });
+      return { content: JSON.stringify(result, null, 2) };
+    },
+  };
+}
+
+export function MemoryRemember(client: ProjectMemoryClient): ToolInfo {
+  return {
+    name: "memory_remember",
+    description:
+      "Append an explicit attributed memory action: remember (new fact), " +
+      "correct / supersede (new record plus lifecycle relationship to a " +
+      "target record), or retract (withdraw current applicability with a " +
+      "reason). History is never rewritten; permission to write is not " +
+      "permission to influence (Stage 5 trust still governs behavior).",
+    input: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["remember", "correct", "supersede", "retract"],
+        },
+        content: { type: "string" },
+        target_record_id: { type: "string" },
+        role: {
+          type: "string",
+          enum: [
+            "ordinary",
+            "evidence",
+            "proposal",
+            "preference",
+            "decision",
+            "production_state",
+          ],
+        },
+        reason: { type: "string" },
+        evidence_refs: { type: "array", items: { type: "string" } },
+        effective_from: { type: "string" },
+        event_time: { type: "string" },
+        idempotency_key: { type: "string" },
+        caller_scope: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+    async execute(input) {
+      const args = input as RememberRequest;
+      const result = await client.remember(args);
       return { content: JSON.stringify(result, null, 2) };
     },
   };
