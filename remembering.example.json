@@ -1,0 +1,10 @@
+{
+  "project_memory_root": "C:/Projects/project-memory",
+  "dsn": "postgresql://postgres:postgres@localhost:5434/memory_baseline",
+  "python": "python",
+  "context": {
+    "auto_inject": true,
+    "max_chars": 4000,
+    "max_results": 6
+  }
+}
