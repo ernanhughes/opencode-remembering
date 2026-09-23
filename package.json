@@ -10,14 +10,29 @@
   },
   "files": [
     "dist",
-    "bridge"
+    "bridge",
+    "engine",
+    "remembering.example.json"
   ],
   "scripts": {
     "build": "bun build ./index.ts --outdir ./dist --target node --format esm --packages external",
     "prepack": "bun run build",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun test"
+    "check": "bun run typecheck && bun test",
+    "doctor": "bun src/dev-cli.ts doctor",
+    "setup": "bun src/dev-cli.ts setup",
+    "refresh": "bun src/dev-cli.ts refresh",
+    "route-eval": "bun src/dev-cli.ts route-eval",
+    "temporal-import": "bun src/dev-cli.ts temporal-import",
+    "temporal-state": "bun src/dev-cli.ts temporal-state",
+    "temporal-eval": "bun src/dev-cli.ts temporal-eval",
+    "frame-health": "bun src/dev-cli.ts frame-health",
+    "frame-eval": "bun src/dev-cli.ts frame-eval",
+    "trust-health": "bun src/dev-cli.ts trust-health",
+    "trust-import": "bun src/dev-cli.ts trust-import",
+    "trust-eval": "bun src/dev-cli.ts trust-eval",
+    "bridge-tests": "python -m pytest bridge/ -v"
   },
   "dependencies": {
     "@opencode/plugin": "^2.0.12"

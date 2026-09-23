@@ -1,5 +1,63 @@
 # OpenCode handoff
 
+> Status 2026-09-23: **Stage 1 is implemented and verified live.**
+> Fresh-install setup, idempotent refresh, hybrid retrieval (FTS +
+> pgvector + RRF), bounded provenance-bearing context, automatic hook
+> injection, and canonical session capture all work against PostgreSQL +
+> pgvector with Ollama `bge-m3`. See README.md for the exact first-run
+> flow.
+>
+> Status 2026-09-24: **Stage 2 (recall/influence routing) is implemented
+> and verified live.** `memory_context` accepts `route=auto|recall|
+> influence`; the deterministic router lives in
+> `project-memory/solution/memory_baseline/routing.py`; routes are
+> visible in traces, bundles, and injected context. Both routes share
+> the same hybrid retriever; no temporal/trust filtering exists yet.
+> Contract: 19 fixtures + 2 override checks = 21 checks, all passing.
+> Frozen Stage 3 boundary: recall preserves historical candidates and
+> does not suppress superseded evidence merely because it is no longer
+> current; influence resolves toward the applicable current state.
+> The next implementation stage is Stage 3 (narrowly temporal) — do not
+> implement it yet.
+
+> Status 2026-09-24 (later): **Stage 3 (temporal state and bitemporal
+> resolution) is implemented and verified live.** Temporal events
+> persist in `<schema>.temporal_events`; setup/refresh manage them
+> automatically; `memory_context` accepts an explicit temporal
+> standpoint; recall interprets time without current-state
+> suppression; influence suppresses only positively proven
+> superseded/corrected/retracted/planned-not-effective evidence, with
+> suppression preserved in the trace. `memory_state` and
+> `memory_temporal_import` added. No trust, framing, or open-loop
+> mechanisms. Temporal validity does not imply trustworthiness.
+
+> Status 2026-09-24 (later still): **Stage 3.5 (standalone product
+> extraction) is implemented.** The runtime engine lives in this
+> repository at `engine/remembering` (ported Apache-2.0 mechanisms
+> with attribution); no `project-memory` checkout is required,
+> configured, or imported at runtime. `PROJECT_MEMORY_ROOT` /
+> `project_memory_root` are gone (stale settings fail closed).
+> The research repository remains provenance in docs only. No Stage 4
+> framing behavior has been introduced.
+
+> Status 2026-09-24 (later still): **Stage 4 (safe project/work
+> framing) is implemented and verified live.** ProjectFrame
+> (`.remembering/project-frame.json`, versioned, fail-closed on
+> identity mismatch), evidence-backed WorkFrames, six establishment
+> classes, and HARD/SOFT/QUERY_ONLY control with soft-retention and
+> conflict/stale fallback. Same-query/different-frame differentiation
+> and wrong-frame safety demonstrated against PostgreSQL + bge-m3.
+> Recall bypasses frame control. No trust/standing, no open loops.
+
+> Status 2026-09-24 (later still): **Stage 5 (trust and standing) is
+> implemented and verified live.** Staged gate
+> (`admit/deny/quarantine`, T0/S1/S2/S3/FULL ladder) over explicit
+> policy, append-only standing events, deterministic instruction
+> screening, structural corroboration, and conflict quarantine.
+> Current+relevant+framed poison is blocked while recall, search, and
+> benign retention are preserved. No scalar scores, no truth claims,
+> no open loops, no consolidation.
+
 This repository has been bootstrapped far enough for OpenCode to take over implementation.
 
 The architectural decision is now fixed:

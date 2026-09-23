@@ -1,7 +1,19 @@
 {
-  "project_memory_root": "C:/Projects/project-memory",
-  "dsn": "postgresql://postgres:postgres@localhost:5434/memory_baseline",
+  "dsn": "postgresql://postgres:<password>@localhost:5432/memory_baseline",
   "python": "python",
+  "embedding": {
+    "provider": "ollama",
+    "model": "bge-m3",
+    "host": "http://localhost:11434"
+  },
+  "retrieval": {
+    "mode": "hybrid",
+    "lexical_k": 30,
+    "dense_k": 30,
+    "fusion_k": 60,
+    "rerank_k": 8,
+    "reranker": "none"
+  },
   "context": {
     "auto_inject": true,
     "max_chars": 4000,
