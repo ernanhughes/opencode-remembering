@@ -29,7 +29,7 @@ const HEALTH: HealthReport = {
   engine_root: "C:/Projects/opencode-remembering/engine",
   engine_version: "remembering-engine-v0.1",
   engine_available: true,
-  python_dependencies: { psycopg: true },
+  python_dependencies: {},
   dsn_redacted: "postgresql://***:***@localhost:5432/memory",
   schema: "remembering_abc",
   project_directory: "c:\\projects\\x",
@@ -555,10 +555,10 @@ describe("memory tools", () => {
     expect(parsed.reason).toBe("temporal.current");
   });
 
-  test("bridge failures propagate instead of returning fake results", async () => {
+  test("engine failures propagate instead of returning fake results", async () => {
     const failing = fakeClient({
       search: async () => {
-        throw new Error("Project Memory bridge failed (search, exit=2): DB_UNREACHABLE: ...");
+        throw new Error("DB_UNREACHABLE: cannot reach PostgreSQL");
       },
     });
     const tool = MemorySearch(failing);
@@ -567,7 +567,7 @@ describe("memory tools", () => {
     ).rejects.toThrow("DB_UNREACHABLE");
   });
 
-  test("memory_trace get/explain/verify route to the bridge", async () => {
+  test("memory_trace get/explain/verify delegate to the engine", async () => {
     const seen: unknown[] = [];
     const tool = MemoryTrace(
       fakeClient({
@@ -644,9 +644,7 @@ describe("memory tools", () => {
     const client = new ProjectMemoryClient(
       {
         dsn: "postgresql://localhost:5432/x",
-        python: "python",
         schema: "remembering_abc",
-        bridgePath: "bridge/remembering_bridge.py",
         embedding: { provider: "ollama", model: "bge-m3", host: "x" },
         retrieval: {
           mode: "hybrid",
@@ -672,9 +670,7 @@ describe("memory tools", () => {
     const client = new ProjectMemoryClient(
       {
         dsn: "postgresql://localhost:5432/x",
-        python: "python",
         schema: "remembering_abc",
-        bridgePath: "bridge/remembering_bridge.py",
         embedding: { provider: "ollama", model: "bge-m3", host: "x" },
         retrieval: {
           mode: "hybrid",
@@ -749,9 +745,7 @@ describe("memory tools", () => {
     const client = new ProjectMemoryClient(
       {
         dsn: "postgresql://localhost:5432/x",
-        python: "python",
         schema: "remembering_abc",
-        bridgePath: "bridge/remembering_bridge.py",
         embedding: { provider: "ollama", model: "bge-m3", host: "x" },
         retrieval: {
           mode: "hybrid",

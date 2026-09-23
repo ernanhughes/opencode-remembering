@@ -1,8 +1,0 @@
-# Runtime Python dependencies for the bundled remembering engine.
-# Install with: python -m pip install -r engine/requirements.txt
-# Only psycopg is required. The optional providers below are needed
-# solely when explicitly configured (see remembering.json).
-psycopg>=3.1
-# optional: sentence-transformers (embedding.provider=sentence-transformers,
-#           retrieval.reranker=cross-encoder)
-# optional: torch (backend for sentence-transformers)

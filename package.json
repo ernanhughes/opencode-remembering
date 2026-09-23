@@ -10,8 +10,6 @@
   },
   "files": [
     "dist",
-    "bridge",
-    "engine",
     "remembering.example.json"
   ],
   "scripts": {
@@ -40,15 +38,20 @@
     "write-health": "bun src/dev-cli.ts write-health",
     "write-eval": "bun src/dev-cli.ts write-eval",
     "write-rebuild": "bun src/dev-cli.ts write-rebuild",
-    "bridge-tests": "python -m pytest bridge/ -v"
+    "native:doctor": "bun src/native-cli.ts doctor",
+    "native:setup": "bun src/native-cli.ts setup",
+    "native:refresh": "bun src/native-cli.ts refresh",
+    "native:search": "bun src/native-cli.ts search"
   },
   "dependencies": {
-    "@opencode/plugin": "^2.0.12"
+    "@opencode/plugin": "^2.0.12",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "@tsconfig/bun": "^1.0.10",
     "@types/bun": "^1.3.3",
     "@types/node": "^24.10.1",
+    "@types/pg": "^8.11.0",
     "typescript": "^5.9.3"
   },
   "engines": {

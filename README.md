@@ -59,38 +59,36 @@ Repository layout:
 
 ```text
 opencode-remembering
-├── src/                        TypeScript OpenCode integration
+├── src/                        TypeScript OpenCode integration + native engine
 │   ├── plugin.ts               tool registration + context hook
 │   ├── tools.ts                ten agent-facing tools
-│   ├── client.ts               bridge process boundary
+│   ├── client.ts               native delegation to RememberingEngine
 │   ├── hook.ts / context.ts    injection, capture, signals
 │   ├── config.ts               strict configuration
-│   └── dev-cli.ts              developer CLI
-├── bridge/
-│   └── remembering_bridge.py   JSON-over-stdin process boundary
-└── engine/remembering/         bundled Python memory engine
-    ├── baseline/               storage, ingestion, embeddings,
-    │                           hybrid retrieval, routing
-    ├── temporal/               event model, reducer, bitemporal engine
-    ├── frame/                  ProjectFrame, WorkFrame, establishment
-    ├── trust/                  standing, revocation, admission gate
-    ├── select/                 decisive evidence selection
-    ├── trace/                  durable ContextTrace + replay
-    ├── loops/                  open-loop events, reducer, queries
-    └── write/                  explicit memory actions, write gate
+│   ├── dev-cli.ts              developer CLI (plugin path)
+│   ├── native-cli.ts           developer CLI (direct engine path)
+│   └── engine/                 native TypeScript memory engine
+│       ├── baseline            storage, ingestion, embeddings,
+│       │                       hybrid retrieval, refresh
+│       ├── temporal/           event model, reducer, bitemporal resolution
+│       ├── frame/              ProjectFrame, WorkFrame, establishment
+│       ├── trust/              standing, revocation, admission gate
+│       ├── selection/          decisive evidence selection
+│       ├── trace/              durable ContextTrace + replay
+│       ├── loops/              open-loop events, reducer, queries
+│       └── write/              explicit memory actions, write gate
 ```
 
 PostgreSQL + pgvector are **required infrastructure**. There is no SQLite fallback, no JSON-file vector store, and no Markdown-journal fallback. The hashing embedder is a deterministic test double, never a production retrieval model, and every layer refuses it unless explicitly opted in for local tests.
 
 ## Quick start
 
-Prerequisites: Bun, Python with `psycopg`, a running PostgreSQL server with pgvector installed, and Ollama `bge-m3` for production embeddings.
+Prerequisites: Bun, a running PostgreSQL server with pgvector installed, and Ollama `bge-m3` for production embeddings. No interpreter, virtualenv, or package install beyond `bun install` — the memory engine is native TypeScript.
 
 ```powershell
 git clone https://github.com/ernanhughes/opencode-remembering
 cd opencode-remembering
 bun install
-python -m pip install -r engine/requirements.txt
 bun run check
 bun run build
 ```
@@ -114,7 +112,6 @@ Copy `remembering.example.json` to `~/.config/opencode/remembering.json` and adj
 ```json
 {
   "dsn": "postgresql://postgres:<password>@localhost:5432/memory_baseline",
-  "python": "python",
   "embedding": {
     "provider": "ollama",
     "model": "bge-m3",
@@ -136,7 +133,7 @@ Copy `remembering.example.json` to `~/.config/opencode/remembering.json` and adj
 }
 ```
 
-Only `dsn` usually needs attention. Without configuration the DSN defaults to `postgresql://postgres:postgres@localhost:5434/memory`. Environment overrides: `MEMORY_BASELINE_DSN`, `PYTHON`, `REMEMBERING_EMBEDDING_PROVIDER`, `REMEMBERING_EMBEDDING_MODEL`, `REMEMBERING_EMBEDDING_HOST`. An explicit `schema` overrides the derived per-project schema and must be a safe SQL identifier. Validation is strict: unknown providers/modes, unsafe schemas, and the `hashing` test double fail closed. A stale `project_memory_root` setting fails closed with migration guidance — the engine ships inside this package.
+Only `dsn` usually needs attention. Without configuration the DSN defaults to `postgresql://postgres:postgres@localhost:5434/memory`. Environment overrides: `MEMORY_BASELINE_DSN`, `REMEMBERING_EMBEDDING_PROVIDER`, `REMEMBERING_EMBEDDING_MODEL`, `REMEMBERING_EMBEDDING_HOST`. An explicit `schema` overrides the derived per-project schema and must be a safe SQL identifier. Validation is strict: unknown providers/modes, unsafe schemas, and the `hashing` test double fail closed. A stale `project_memory_root` setting fails closed with migration guidance — the engine is native TypeScript and ships as compiled `dist/`.
 
 ## First run
 
@@ -322,20 +319,12 @@ The context hook merges unseen OpenCode messages into `.remembering/sessions/<se
 
 ## Evaluation
 
-Each stage keeps its own contract — never one memory score:
+Each stage keeps its own contract — never one memory score. Native fixture
+evaluations run in-process via `RememberingEngine` (`route-eval`, `temporal-eval`,
+`frame-eval`, `trust-eval` incl. the T0–FULL ladder, `selection-eval`, `trace-eval`,
+`loop-eval`, `write-eval`); the unit suite is the contract record.
 
-```text
-routing:    21/21
-temporal:   16/16
-framing:    10/10
-trust:      17/17 (+ T0–FULL ladder)
-selection:  18/18
-trace:      11/11 engine + A–W bridge checks
-loops:      13/13 engine + integration
-writes:     30 semantic categories, 44/44 checks + 24 PostgreSQL tests
-```
-
-Current suite: Bun 47/47, engine 16/16, bridge 123/123 (139 Python total), build green, 78-file package, 8/8 packed evaluations green from a scrubbed directory. Run `bun run check`, `python -m pytest engine/tests/ bridge/`, `bun run build`; per-area `*-eval` scripts and `bridge-tests` in `package.json`.
+Current suite: `bun run check` (typecheck + all Bun tests) and `bun run build` green.
 
 ## Development / CLI
 
@@ -359,7 +348,7 @@ Evaluation:        route-eval + every *-eval above
 
 ## Standalone packaging
 
-The product owns its runtime: `bun pm pack` ships `dist/`, `bridge/`, `engine/`. Installing requires no research checkout, no `PROJECT_MEMORY_ROOT`, no sibling directory. All eight packed evaluations run from outside the checkout with the environment scrubbed.
+The product owns its runtime: `bun pm pack` ships compiled `dist/`. Installing requires no research checkout, no `PROJECT_MEMORY_ROOT`, no sibling directory, no interpreter.
 
 ## Operating boundary
 

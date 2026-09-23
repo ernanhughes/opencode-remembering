@@ -90,3 +90,44 @@ Live acceptance (PG + pgvector + bge-m3): remember/correct/supersede/retract seq
 ## Recommended Stage 10 (not implemented)
 
 Matched behavioral evaluation: M0 (no memory) vs M1 (strong hybrid RAG) vs M2 (full remembering) on identical tasks, measuring task success, stale-memory harm, current/historical-state correctness, unsafe-memory influence, unfinished-work and provenance correctness, context size, latency, and action differences — separately, with no composite score.
+
+## Stage 3 — Native TypeScript memory semantics (canonical engine)
+
+Status: native engine complete; OpenCode still uses the legacy bridge until Stage 4 cutover.
+
+Native pipeline (all TypeScript, no subprocess):
+
+retrieval -> temporal -> frame -> trust/standing -> selection/budget -> ContextTrace -> open loops + explicit writes
+
+New modules under src/engine/: temporal/{model,reducer,store,service},
+frame/{model,service}, trust/{model,policy,standing,store}, selection/{model,service},
+trace/{model,store,service}, loops/{model,store}, write/{model,policy,store,service},
+context.ts (route + staged assembly). RememberingEngine exposes temporalImport, state,
+frameEstablish, trustDecisions, trace*, loop*, remember/recordShow/writeHistory/writeRebuild,
+context, nativeDoctor. CLI: bun src/native-cli.ts <doctor|setup|refresh|search|context|state|
+temporal-import|frame-health|trust-health|trace|loop-health|loop-list|loop-show|loop-history|
+remember|write-health|write-history|write-rebuild|record-show>.
+
+Invariants: append-only histories; recall preserves revoked/superseded evidence while
+influence denies it; retrieved text is data (instruction screening quarantines, never executes);
+memory:// sources survive refresh pruning; zero events/loops/traces is healthy, not failure.
+sentence-transformers/cross-encoder remain fail-closed (no legacy runtime fallback).
+
+Validation: 114 tests pass, tsc clean, build clean, git diff --check clean.
+ProjectMemoryClient NOT cut over. bridge/ + engine/remembering/ retained as legacy, unmodified.
+
+## Stage 4 — Native cutover and legacy removal (complete)
+
+ProjectMemoryClient now delegates every method to RememberingEngine; no subprocess,
+no JSON protocol, no interpreter lookup. config no longer carries python/bridgePath
+(stale keys are simply ignored); hashing provider allowed under
+REMEMBERING_ALLOW_TEST_EMBEDDINGS=1. Deleted: bridge/, engine/ (incl.
+requirements.txt), .pytest_cache, bridge-tests script. Package ships 5 files
+(dist + docs + example config); packed install verified in a scrubbed directory.
+Regression guard widened: src/no-python-runtime.test.ts scans all of src/ + index.ts
+for subprocess/legacy tokens. Eval commands run native fixture evaluations
+(src/engine/evaluations.ts). Session capture is file-based and DB-independent.
+
+Validation: 121 tests pass, tsc clean, build clean, git diff --check clean.
+Migration Python -> TypeScript is complete. Next: product hardening (install,
+configuration, live project use, performance, memory behavior).

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Development CLI around the Python bridge. Same adapter path as the
- * OpenCode plugin (config -> client -> bridge -> bundled engine), usable
+ * Development CLI around the native engine. Same adapter path as the
+ * OpenCode plugin (config -> client -> native engine), usable
  * without running OpenCode:
  *
  *   bun src/dev-cli.ts doctor

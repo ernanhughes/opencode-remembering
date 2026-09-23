@@ -1,6 +1,5 @@
-import { spawn } from "node:child_process";
-
 import type { RememberingConfig } from "./config";
+import { RememberingEngine } from "./engine/pipeline";
 
 export type HealthReport = {
   ok: boolean;
@@ -735,122 +734,94 @@ function validateTemporalRequest(temporal: TemporalStandpointRequest): void {
 }
 
 export class ProjectMemoryClient {
+  private readonly engine: RememberingEngine;
+
   constructor(
     private readonly config: RememberingConfig,
     private readonly projectDirectory: string,
-  ) {}
+    engineOverride?: RememberingEngine,
+  ) {
+    this.engine = engineOverride ?? new RememberingEngine({
+      dsn: config.dsn,
+      schema: config.schema,
+      projectDirectory,
+      embedding: {
+        provider: config.embedding.provider as "ollama" | "sentence-transformers" | "hashing",
+        model: config.embedding.model,
+        host: config.embedding.host,
+      },
+      retrieval: {
+        mode: config.retrieval.mode,
+        lexicalK: config.retrieval.lexicalK,
+        denseK: config.retrieval.denseK,
+        fusionK: config.retrieval.fusionK,
+        rerankK: config.retrieval.rerankK,
+        reranker: config.retrieval.reranker,
+      },
+    });
+  }
 
   get schema(): string {
     return this.config.schema;
   }
 
-  private call<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
-    const input = JSON.stringify({
-      ...payload,
+  async doctor(): Promise<HealthReport> {
+    return (await this.engine.nativeDoctor()) as unknown as HealthReport;
+  }
+
+  async setup(): Promise<SetupResult> {
+    const steps: SetupStep[] = [];
+    const timed = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+      const started = performance.now();
+      try {
+        const value = await fn();
+        steps.push({ name, ok: true, ms: Math.round((performance.now() - started) * 10) / 10, detail: "ok" });
+        return value;
+      } catch (error) {
+        steps.push({
+          name, ok: false, ms: Math.round((performance.now() - started) * 10) / 10,
+          detail: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+        });
+        throw error;
+      }
+    };
+    await timed("engine", async () => "native TypeScript engine");
+    const setup = await timed("initialise", () => this.engine.setup());
+    const refresh = (await timed("refresh", () => this.engine.refresh())) as unknown as RefreshResult;
+    return {
+      ok: true,
       schema: this.config.schema,
       project_directory: this.projectDirectory,
-      embedding: {
-        provider: this.config.embedding.provider,
-        model: this.config.embedding.model,
-        host: this.config.embedding.host,
-      },
-      retrieval: {
-        mode: this.config.retrieval.mode,
-        lexical_k: this.config.retrieval.lexicalK,
-        dense_k: this.config.retrieval.denseK,
-        fusion_k: this.config.retrieval.fusionK,
-        rerank_k: this.config.retrieval.rerankK,
-        reranker: this.config.retrieval.reranker,
-      },
-    });
-
-    return new Promise<T>((resolve, reject) => {
-      const child = spawn(this.config.python, [this.config.bridgePath, action], {
-        windowsHide: true,
-        env: {
-          ...process.env,
-          MEMORY_BASELINE_DSN: this.config.dsn,
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-
-      let stdout = "";
-      let stderr = "";
-      const timeout = setTimeout(
-        () => {
-          child.kill();
-          reject(new Error(`Project Memory bridge timed out (${action})`));
-        },
-        TIMEOUTS_MS[action] ?? 60_000,
-      );
-
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
-      });
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-      });
-
-      child.on("error", (error) => {
-        clearTimeout(timeout);
-        reject(
-          new Error(
-            `Project Memory bridge failed to start (${action}): ${error.message}`,
-            { cause: error },
-          ),
-        );
-      });
-
-      child.on("close", (code) => {
-        clearTimeout(timeout);
-        if (code !== 0) {
-          reject(
-            new Error(
-              `Project Memory bridge failed (${action}, exit=${code}): ${stderr.trim() || stdout.trim()}`,
-            ),
-          );
-          return;
-        }
-
-        if (stderr.trim()) {
-          console.warn(`[opencode-remembering] bridge stderr: ${stderr.trim()}`);
-        }
-
-        try {
-          resolve(JSON.parse(stdout) as T);
-        } catch (error) {
-          reject(
-            new Error(
-              `Project Memory bridge returned invalid JSON (${action}): ${stdout.slice(0, 500)}`,
-              { cause: error },
-            ),
-          );
-        }
-      });
-
-      child.stdin.end(input);
-    });
+      steps,
+      embedding: setup.embedding,
+      refresh,
+    };
   }
 
-  doctor(): Promise<HealthReport> {
-    return this.call<HealthReport>("doctor");
+  async refresh(): Promise<RefreshResult> {
+    const report = await this.engine.refresh();
+    return {
+      ok: report.ok,
+      schema: report.schema,
+      discovered: report.discovered,
+      indexed: report.indexed,
+      unchanged: report.unchanged,
+      added: report.added,
+      changed: report.changed,
+      removed: report.removed,
+      chunks: report.chunks,
+      embedded: report.embedded,
+      failed: report.failed,
+      ...(report.temporal ? { temporal: report.temporal } : {}),
+      ...(report.message ? { message: report.message } : {}),
+    };
   }
 
-  setup(): Promise<SetupResult> {
-    return this.call<SetupResult>("setup");
+  async search(query: string, limit = 8): Promise<SearchResult> {
+    return (await this.engine.search(query, limit)) as unknown as SearchResult;
   }
 
-  refresh(): Promise<RefreshResult> {
-    return this.call<RefreshResult>("refresh");
-  }
-
-  search(query: string, limit = 8): Promise<SearchResult> {
-    return this.call<SearchResult>("search", { query, limit });
-  }
-
-  context(
+  async context(
     query: string,
     maxChars: number,
     maxResults: number,
@@ -877,19 +848,30 @@ export class ProjectMemoryClient {
     if (selection !== undefined) {
       validateSelectionRequest(selection);
     }
-    return this.call<ContextResult>("context", {
+    return (await this.engine.context(
       query,
-      max_chars: maxChars,
-      max_results: maxResults,
+      maxChars,
+      maxResults,
       route,
-      temporal,
-      work,
-      trust,
-      selection,
-    });
+      temporal ? { mode: temporal.mode, valid_at: temporal.valid_at, known_at: temporal.known_at } : undefined,
+      work ? {
+        mode: work.mode,
+        work_type: work.work_type,
+        objective: work.objective,
+        prior_work_type: work.prior_work_type,
+        signals: work.signals?.map((s) => ({
+          signal_id: s.signal_id,
+          kind: s.kind,
+          text: s.text,
+          observed_at: s.observed_at,
+        })),
+      } : undefined,
+      trust ? { caller_scope: trust.caller_scope, level: trust.level } : undefined,
+      selection ? { mode: selection.mode } : undefined,
+    )) as unknown as ContextResult;
   }
 
-  state(
+  async state(
     subject: string,
     options: {
       query?: string;
@@ -909,43 +891,64 @@ export class ProjectMemoryClient {
     if (options.temporal !== undefined) {
       validateTemporalRequest(options.temporal);
     }
-    return this.call<StateResult>("state", {
-      subject,
+    return (await this.engine.state(subject, {
       query: options.query ?? "",
       route,
-      temporal: options.temporal,
-    });
+      temporal: options.temporal
+        ? { mode: options.temporal.mode, valid_at: options.temporal.valid_at, known_at: options.temporal.known_at }
+        : undefined,
+    })) as unknown as StateResult;
   }
 
-  temporalImport(): Promise<TemporalImportResult> {
-    return this.call<TemporalImportResult>("temporal_import");
+  async temporalImport(): Promise<TemporalImportResult> {
+    return (await this.engine.temporalImport()) as unknown as TemporalImportResult;
   }
 
-  trustImport(): Promise<TemporalImportResult> {
-    return this.call<TemporalImportResult>("trust_import");
+  async trustImport(): Promise<TemporalImportResult> {
+    const result = await this.engine.trustImport();
+    return {
+      ok: result.ok,
+      schema: result.schema,
+      message: result.message,
+      imported: result.imported,
+      duplicates: result.duplicates,
+      failed: result.failed,
+      events: result.events,
+      subjects: result.subjects,
+    };
   }
 
-  trustEval(): Promise<TrustEvaluation> {
-    return this.call<TrustEvaluation>("trust_eval");
+  async trustEval(): Promise<TrustEvaluation> {
+    return (await this.engine.trustEval()) as unknown as TrustEvaluation;
   }
 
-  selectionEval(): Promise<TemporalEvaluation> {
-    return this.call<TemporalEvaluation>("selection_eval");
+  async selectionEval(): Promise<TemporalEvaluation> {
+    return (await this.engine.selectionEval()) as unknown as TemporalEvaluation;
   }
 
-  loopEval(): Promise<LoopEvaluation> {
-    return this.call<LoopEvaluation>("loop_eval");
+  async loopEval(): Promise<LoopEvaluation> {
+    return (await this.engine.loopEval()) as unknown as LoopEvaluation;
   }
 
-  loopImport(): Promise<TemporalImportResult> {
-    return this.call<TemporalImportResult>("loop_import");
+  async loopImport(): Promise<TemporalImportResult> {
+    const result = await this.engine.loopImport();
+    return {
+      ok: result.ok,
+      schema: result.schema,
+      message: result.message,
+      imported: result.imported,
+      duplicates: result.duplicates,
+      failed: result.failed,
+      events: result.events,
+      subjects: result.subjects,
+    };
   }
 
-  loopRebuild(): Promise<Record<string, unknown>> {
-    return this.call<Record<string, unknown>>("loop_rebuild");
+  async loopRebuild(): Promise<Record<string, unknown>> {
+    return this.engine.loopRebuild();
   }
 
-  loopCreate(transition: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async loopCreate(transition: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (
       !transition ||
       typeof transition !== "object" ||
@@ -953,93 +956,139 @@ export class ProjectMemoryClient {
     ) {
       throw new Error("loop-create requires a transition object.");
     }
-    return this.call<Record<string, unknown>>("loop_create", {
-      transition,
-    });
+    return this.engine.loopCreate(transition);
   }
 
   async openLoops(request: LoopRequest = {}): Promise<Record<string, unknown>> {
     validateLoopRequest(request);
-    return this.call<Record<string, unknown>>("loops", request);
+    return this.engine.openLoops(request);
   }
 
-  traceEval(): Promise<TemporalEvaluation> {
-    return this.call<TemporalEvaluation>("trace_eval");
+  async traceEval(): Promise<TemporalEvaluation> {
+    return (await this.engine.traceEval()) as unknown as TemporalEvaluation;
   }
 
   async trace(request: TraceRequest): Promise<Record<string, unknown>> {
     validateTraceRequest(request);
-    return this.call<Record<string, unknown>>("trace", {
-      mode: request.mode,
-      ...(request as Record<string, unknown>),
-    });
+    if (request.mode === "get" || request.mode === "verify") {
+      return request.mode === "get"
+        ? this.engine.traceGet(request.trace_id)
+        : this.engine.traceVerify(request.trace_id);
+    }
+    if (request.mode === "find") {
+      return this.engine.traceFind(request.filters ?? {});
+    }
+    if (request.mode === "explain") {
+      return this.engine.traceExplain(request.trace_id, request.candidate_id);
+    }
+    if (request.mode === "replay") {
+      return this.engine.traceReplay(request.trace_id, request.replay_kind, request.persist ?? false);
+    }
+    return this.engine.traceDiff(request.trace_id, request.diff_with);
   }
 
-  temporalEval(): Promise<TemporalEvaluation> {
-    return this.call<TemporalEvaluation>("temporal_eval");
+  async temporalEval(): Promise<TemporalEvaluation> {
+    return (await this.engine.temporalEval()) as unknown as TemporalEvaluation;
   }
 
-  frameEval(): Promise<TemporalEvaluation> {
-    return this.call<TemporalEvaluation>("frame_eval");
+  async frameEval(): Promise<TemporalEvaluation> {
+    return (await this.engine.frameEval()) as unknown as TemporalEvaluation;
   }
 
-  routeEval(): Promise<RouteEvalResult> {
-    return this.call<RouteEvalResult>("route_eval");
+  async routeEval(): Promise<RouteEvalResult> {
+    return (await this.engine.routeEval()) as unknown as RouteEvalResult;
   }
 
   async remember(request: RememberRequest = {}): Promise<RememberResult> {
     validateRememberRequest(request);
-    return this.call<RememberResult>("remember", {
+    const output = (await this.engine.remember({
       action: request.action ?? "remember",
       content: request.content,
-      target_record_id: request.target_record_id,
+      targetRecordId: request.target_record_id,
       role: request.role ?? "ordinary",
       reason: request.reason,
-      evidence_refs: request.evidence_refs ?? [],
-      effective_from: request.effective_from,
-      event_time: request.event_time,
-      idempotency_key: request.idempotency_key,
-      caller_scope: request.caller_scope ?? "default",
+      evidenceRefs: request.evidence_refs ?? [],
+      effectiveFrom: request.effective_from,
+      eventTime: request.event_time,
+      idempotencyKey: request.idempotency_key,
+      callerScope: request.caller_scope ?? "default",
       origin: request.origin ?? "opencode",
-    });
+    })) as unknown as {
+      ok: boolean;
+      code?: string;
+      reason?: string;
+      action_id?: string;
+      action?: string;
+      record_id?: string | null;
+      target_record_id?: string | null;
+      duplicate?: boolean;
+      authorization?: { verdict: string; reason: string; policyVersion: string; policyDigest: string; matchedGrantId: string | null };
+      record?: { role: string; standingCeiling: string; sourceId: string; lineageRoot: string } | null;
+      index?: { indexed: boolean; chunks: number; embedded: number };
+      relation?: { type: string; targetRecordId: string } | null;
+      schema?: string;
+    };
+    return {
+      ok: output.ok,
+      code: output.code,
+      reason: output.reason,
+      action_id: output.action_id,
+      action: output.action,
+      record_id: output.record_id,
+      target_record_id: output.target_record_id,
+      duplicate: output.duplicate,
+      authorization: output.authorization ? {
+        verdict: output.authorization.verdict,
+        reason: output.authorization.reason,
+        policy_version: output.authorization.policyVersion,
+        policy_digest: output.authorization.policyDigest,
+        matched_grant_id: output.authorization.matchedGrantId,
+      } : undefined,
+      record: output.record ? {
+        role: output.record.role,
+        standing_ceiling: output.record.standingCeiling,
+        source_id: output.record.sourceId,
+        lineage_root: output.record.lineageRoot,
+      } : null,
+      index: output.index,
+      relation: output.relation ? {
+        type: output.relation.type,
+        target_record_id: output.relation.targetRecordId,
+      } : null,
+      schema: output.schema,
+    };
   }
 
-  writeEval(): Promise<WriteEvaluation> {
-    return this.call<WriteEvaluation>("write_eval");
+  async writeEval(): Promise<WriteEvaluation> {
+    return (await this.engine.writeEval()) as unknown as WriteEvaluation;
   }
 
-  writeRebuild(): Promise<Record<string, unknown>> {
-    return this.call<Record<string, unknown>>("write_rebuild");
+  async writeRebuild(): Promise<Record<string, unknown>> {
+    return this.engine.writeRebuild();
   }
 
   async recordShow(recordId: string): Promise<Record<string, unknown>> {
     if (!recordId.trim()) {
       throw new Error("recordShow requires record_id.");
     }
-    return this.call<Record<string, unknown>>("record_show", {
-      record_id: recordId,
-    });
+    return this.engine.recordShow(recordId);
   }
 
   async actionShow(actionId: string): Promise<Record<string, unknown>> {
     if (!actionId.trim()) {
       throw new Error("actionShow requires action_id.");
     }
-    return this.call<Record<string, unknown>>("action_show", {
-      action_id: actionId,
-    });
+    return this.engine.actionShow(actionId);
   }
 
   async writeHistory(recordId: string): Promise<Record<string, unknown>> {
     if (!recordId.trim()) {
       throw new Error("writeHistory requires record_id.");
     }
-    return this.call<Record<string, unknown>>("write_history", {
-      record_id: recordId,
-    });
+    return this.engine.writeHistory(recordId);
   }
 
-  captureSession(
+  async captureSession(
     sessionId: string,
     facts: {
       agent?: string;
@@ -1048,12 +1097,20 @@ export class ProjectMemoryClient {
       messages: CaptureMessage[];
     },
   ): Promise<CaptureResult> {
-    return this.call<CaptureResult>("capture_session", {
-      session_id: sessionId,
+    return (await this.engine.captureSession(sessionId, {
       agent: facts.agent,
       provider: facts.provider,
       model: facts.model,
-      messages: facts.messages,
-    });
+      messages: facts.messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        text: m.text,
+        agent: m.agent,
+        model: m.model,
+        tool_calls: m.tool_calls,
+        tool_results: m.tool_results,
+        observed_at: m.observed_at,
+      })),
+    })) as unknown as CaptureResult;
   }
 }

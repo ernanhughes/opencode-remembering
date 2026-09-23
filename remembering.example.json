@@ -1,6 +1,5 @@
 {
   "dsn": "postgresql://postgres:<password>@localhost:5432/memory_baseline",
-  "python": "python",
   "embedding": {
     "provider": "ollama",
     "model": "bge-m3",

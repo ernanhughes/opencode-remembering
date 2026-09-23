@@ -2,10 +2,9 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 
 export type EmbeddingConfig = {
-  provider: "ollama" | "sentence-transformers";
+  provider: "ollama" | "sentence-transformers" | "hashing";
   model: string;
   host: string;
 };
@@ -21,9 +20,7 @@ export type RetrievalConfig = {
 
 export type RememberingConfig = {
   dsn: string;
-  python: string;
   schema: string;
-  bridgePath: string;
   embedding: EmbeddingConfig;
   retrieval: RetrievalConfig;
   context: {
@@ -35,7 +32,6 @@ export type RememberingConfig = {
 
 type RawConfig = {
   dsn?: unknown;
-  python?: unknown;
   schema?: unknown;
   // Removed in Stage 3.5 (bundled engine). Still detected so stale
   // configs fail closed; see rejectLegacyRoot.
@@ -164,27 +160,21 @@ function parseEmbedding(raw: RawConfig): EmbeddingConfig {
     nonEmptyString(process.env.REMEMBERING_EMBEDDING_PROVIDER) ??
     nonEmptyString(raw.embedding?.provider) ??
     "ollama";
-  if (provider !== "ollama" && provider !== "sentence-transformers") {
-    if (provider === "hashing") {
-      // The hashing embedder is a deterministic test double, never a
-      // production retrieval model. It is only honoured for explicitly
-      // opted-in local tests, never by silent fallback.
-      if (process.env.REMEMBERING_ALLOW_TEST_EMBEDDINGS !== "1") {
-        throw new Error(
-          "Invalid OpenCode Remembering config: embedding.provider " +
-            '"hashing" is a test double and is refused without ' +
-            "REMEMBERING_ALLOW_TEST_EMBEDDINGS=1.",
-        );
-      }
+  if (provider === "hashing") {
+    // The hashing embedder is a deterministic test double, never a
+    // production retrieval model. It is only honoured for explicitly
+    // opted-in local tests, never by silent fallback.
+    if (process.env.REMEMBERING_ALLOW_TEST_EMBEDDINGS !== "1") {
       throw new Error(
         "Invalid OpenCode Remembering config: embedding.provider " +
-          '"hashing" is not supported by the OpenCode adapter; run the ' +
-          "Python bridge tests directly for hashing-embedder coverage.",
+          '"hashing" is a test double and is refused without ' +
+          "REMEMBERING_ALLOW_TEST_EMBEDDINGS=1.",
       );
     }
+  } else if (provider !== "ollama" && provider !== "sentence-transformers") {
     throw new Error(
       `Invalid OpenCode Remembering config: embedding.provider must be ` +
-        `"ollama" or "sentence-transformers", got ${JSON.stringify(provider)}.`,
+        `"ollama", "sentence-transformers" or "hashing", got ${JSON.stringify(provider)}.`,
     );
   }
   const model =
@@ -213,7 +203,7 @@ function parseRetrieval(raw: RawConfig): RetrievalConfig {
         `"none", "overlap" or "cross-encoder", got ${JSON.stringify(reranker)}.`,
     );
   }
-  // Default reranker is "none": the bridge must not download a
+  // Default reranker is "none": the engine must not download a
   // cross-encoder model unless the operator explicitly asks for it.
   return {
     mode,
@@ -248,7 +238,6 @@ export async function loadConfig(
     nonEmptyString(raw.dsn) ??
     "postgresql://postgres:postgres@localhost:5434/memory";
 
-  const python = nonEmptyString(raw.python) ?? process.env.PYTHON ?? "python";
   const rawSchema = nonEmptyString(raw.schema);
   const schema =
     rawSchema !== undefined
@@ -261,11 +250,7 @@ export async function loadConfig(
 
   return {
     dsn,
-    python,
     schema,
-    bridgePath: fileURLToPath(
-      new URL("../bridge/remembering_bridge.py", import.meta.url),
-    ),
     embedding: parseEmbedding(raw),
     retrieval: parseRetrieval(raw),
     context: {
@@ -277,10 +262,9 @@ export async function loadConfig(
 }
 
 /**
- * The external project-memory checkout is gone: the engine ships
- * inside this package (engine/remembering). A stale
- * project_memory_root setting fails closed with migration guidance
- * instead of being silently ignored.
+ * The legacy runtime is gone: the memory engine is native TypeScript
+ * (src/engine). A stale project_memory_root setting fails closed with
+ * migration guidance instead of being silently ignored.
  */
 function rejectLegacyRoot(raw: RawConfig): void {
   if (
@@ -290,7 +274,7 @@ function rejectLegacyRoot(raw: RawConfig): void {
     throw new Error(
       "Invalid OpenCode Remembering config: project_memory_root / " +
         "PROJECT_MEMORY_ROOT no longer exists. The memory engine is " +
-        "bundled with opencode-remembering (engine/remembering); remove " +
+        "native TypeScript (src/engine); remove " +
         "the setting — no replacement path is needed.",
     );
   }
