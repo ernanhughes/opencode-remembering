@@ -1,9 +1,6 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 
 import type { RememberingConfig } from "./config";
-
-const execFileAsync = promisify(execFile);
 
 export type DoctorResult = {
   ok: boolean;
@@ -44,38 +41,82 @@ export class ProjectMemoryClient {
     private readonly projectDirectory: string,
   ) {}
 
-  private async call<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
+  private call<T>(action: string, payload: Record<string, unknown> = {}): Promise<T> {
     const input = JSON.stringify({
       ...payload,
       schema: this.config.schema,
       project_directory: this.projectDirectory,
     });
 
-    try {
-      const { stdout, stderr } = await execFileAsync(
+    return new Promise<T>((resolve, reject) => {
+      const child = spawn(
         this.config.python,
         [this.config.bridgePath, action],
         {
-          input,
-          timeout: 30_000,
-          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
           env: {
             ...process.env,
             PROJECT_MEMORY_ROOT: this.config.projectMemoryRoot,
             MEMORY_BASELINE_DSN: this.config.dsn,
           },
+          stdio: ["pipe", "pipe", "pipe"],
         },
       );
-      if (stderr.trim()) {
-        console.warn(`[opencode-remembering] bridge stderr: ${stderr.trim()}`);
-      }
-      return JSON.parse(stdout) as T;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Project Memory bridge failed (${action}): ${detail}`, {
-        cause: error,
+
+      let stdout = "";
+      let stderr = "";
+      const timeout = setTimeout(() => {
+        child.kill();
+        reject(new Error(`Project Memory bridge timed out (${action})`));
+      }, 30_000);
+
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
       });
-    }
+      child.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+
+      child.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(
+          new Error(`Project Memory bridge failed to start (${action}): ${error.message}`, {
+            cause: error,
+          }),
+        );
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        if (code !== 0) {
+          reject(
+            new Error(
+              `Project Memory bridge failed (${action}, exit=${code}): ${stderr.trim() || stdout.trim()}`,
+            ),
+          );
+          return;
+        }
+
+        if (stderr.trim()) {
+          console.warn(`[opencode-remembering] bridge stderr: ${stderr.trim()}`);
+        }
+
+        try {
+          resolve(JSON.parse(stdout) as T);
+        } catch (error) {
+          reject(
+            new Error(
+              `Project Memory bridge returned invalid JSON (${action}): ${stdout.slice(0, 500)}`,
+              { cause: error },
+            ),
+          );
+        }
+      });
+
+      child.stdin.end(input);
+    });
   }
 
   doctor(): Promise<DoctorResult> {
