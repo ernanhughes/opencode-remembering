@@ -602,6 +602,72 @@ def trace_health(connection, schema: str) -> dict[str, Any]:
     return section
 
 
+def loops_health(connection, schema: str,
+                 project_dir: Path) -> dict[str, Any]:
+    """Loop section for memory_health. Zero loops is healthy."""
+    from remembering.loops import postgres as loops_pg
+    from remembering.loops.model import (
+        LOOP_CLOSURE_VERSION,
+        LOOP_ENGINE_VERSION,
+        LOOP_EVENT_SCHEMA,
+        LOOP_REDUCER_VERSION,
+    )
+
+    section: dict[str, Any] = {
+        "loops_engine_version": LOOP_ENGINE_VERSION,
+        "store_version": None,
+        "event_schema_version": LOOP_EVENT_SCHEMA,
+        "reducer_version": LOOP_REDUCER_VERSION,
+        "closure_version": LOOP_CLOSURE_VERSION,
+        "ready": False,
+        "event_count": 0,
+        "loop_count": 0,
+        "open": 0,
+        "completed": 0,
+        "cancelled": 0,
+        "superseded": 0,
+        "uncertain": 0,
+        "unresolved_evidence_refs": [],
+    }
+    try:
+        with connection.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)",
+                        (f"{schema}.open_loop_events",))
+            if cur.fetchone()[0] is None:
+                return section
+        section["ready"] = True
+        section["event_count"] = loops_pg.event_count(connection, schema)
+        loaded = load_loop_views(connection, schema, project_dir)
+        views = loaded["views"]
+        section["loop_count"] = len(views)
+        for view in views.values():
+            if view.state.value in section:
+                section[view.state.value] += 1
+        versions = loaded["versions"]
+        if versions.get("store_version"):
+            section["store_version"] = versions["store_version"]
+        refs: set[str] = set()
+        for view in views.values():
+            for ref in view.evidence_refs:
+                refs.add(ref)
+        with connection.cursor() as cur:
+            from psycopg import sql as _sql
+
+            try:
+                cur.execute(_sql.SQL(
+                    "SELECT source_id FROM {}.sources").format(
+                        _sql.Identifier(schema)))
+                known = {row[0] for row in cur.fetchall()}
+            except Exception:
+                known = set()
+        section["unresolved_evidence_refs"] = sorted(
+            ref for ref in refs
+            if ref and ref not in known and not ref.startswith("loop:"))
+    except Exception as exc:
+        section["error"] = (f"{type(exc).__name__}: {str(exc)[:160]}")
+    return section
+
+
 def load_temporal_log(connection, schema: str):
     from remembering.temporal import postgres as temporal_pg
 
@@ -737,6 +803,22 @@ def doctor(payload: dict[str, Any]) -> dict[str, Any]:
             "newest_trace": None,
             "retention": "indefinite",
         },
+        "loops": {
+            "loops_engine_version": "loops-engine-v0.1",
+            "store_version": None,
+            "event_schema_version": "loop-event-v0.1",
+            "reducer_version": "loop-reducer-v0.1",
+            "closure_version": "loop-closure-v0.1",
+            "ready": False,
+            "event_count": 0,
+            "loop_count": 0,
+            "open": 0,
+            "completed": 0,
+            "cancelled": 0,
+            "superseded": 0,
+            "uncertain": 0,
+            "unresolved_evidence_refs": [],
+        },
     }
 
     def fail(message: str) -> dict[str, Any]:
@@ -854,6 +936,8 @@ def doctor(payload: dict[str, Any]) -> dict[str, Any]:
                 report["trust"] = trust_health(connection, schema,
                                                project_dir)
                 report["trace"] = trace_health(connection, schema)
+                report["loops"] = loops_health(connection, schema,
+                                               project_dir)
     finally:
         connection.close()
 
@@ -1082,6 +1166,10 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
 
             trace_versions = trace_pg.initialise(
                 baseline.store.conn, schema)
+            from remembering.loops import postgres as loops_pg
+
+            loop_versions = loops_pg.initialise(
+                baseline.store.conn, schema)
             trust_check = validate_trust_config(project_dir)
             if trust_check["error"]:
                 raise BridgeError("TRUST_POLICY_INVALID",
@@ -1093,6 +1181,7 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
                     f"{temporal_versions['store_version']}; "
                     f"{standing_versions['store_version']}; "
                     f"{trace_versions['store_version']}; "
+                    f"{loop_versions['store_version']}; "
                     f"trust policy {trust_check['detail']})")
 
         _timed(steps, "initialise", s_initialise)
@@ -1104,10 +1193,13 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
                 baseline.store.conn, schema, project_dir)
             standing = import_standing_events(
                 baseline.store.conn, schema, project_dir)
+            loops = import_loop_events(
+                baseline.store.conn, schema, project_dir)
             refresh_dict = refresh_report_to_dict(refresh)
             refresh_dict["schema"] = schema
             refresh_dict["temporal"] = temporal
             refresh_dict["trust"] = standing
+            refresh_dict["loops"] = loops
             result["refresh"] = refresh_dict
             if refresh.unchanged and not (
                     refresh.added or refresh.changed or refresh.removed):
@@ -1129,6 +1221,11 @@ def do_setup(payload: dict[str, Any]) -> dict[str, Any]:
             elif standing["imported"]:
                 temporal_note += (f"; standing events "
                                   f"+{standing['imported']}")
+            if loops["failed"]:
+                temporal_note += (f"; loop import failures: "
+                                  f"{loops['failed']}")
+            elif loops["imported"]:
+                temporal_note += (f"; loop events +{loops['imported']}")
             return (f"discovered {refresh.discovered}, {summary}; "
                     f"failed: {refresh.failed or 'none'}{temporal_note}")
 
@@ -1192,18 +1289,23 @@ def do_refresh(payload: dict[str, Any]) -> dict[str, Any]:
             ensure_temporal_objects(baseline.store.conn, schema)
             from remembering.trust import postgres as standing_pg
             from remembering.trace import postgres as trace_pg
+            from remembering.loops import postgres as loops_pg
 
             standing_pg.initialise(baseline.store.conn, schema)
             trace_pg.initialise(baseline.store.conn, schema)
+            loops_pg.initialise(baseline.store.conn, schema)
             refresh = baseline.refresh(Path(os.path.realpath(project_dir)))
             temporal = import_temporal_events(
                 baseline.store.conn, schema, project_dir)
             standing = import_standing_events(
                 baseline.store.conn, schema, project_dir)
+            loops = import_loop_events(
+                baseline.store.conn, schema, project_dir)
             out = refresh_report_to_dict(refresh)
             out["schema"] = schema
             out["temporal"] = temporal
             out["trust"] = standing
+            out["loops"] = loops
             if temporal["failed"]:
                 out["message"] = (
                     f"discovered {refresh.discovered}: +{refresh.added} "
@@ -1216,6 +1318,12 @@ def do_refresh(payload: dict[str, Any]) -> dict[str, Any]:
                     f"~{refresh.changed} -{refresh.removed}, "
                     f"{refresh.embedded} chunks embedded; "
                     f"STANDING import failures: {standing['failed']}")
+            elif loops["failed"]:
+                out["message"] = (
+                    f"discovered {refresh.discovered}: +{refresh.added} "
+                    f"~{refresh.changed} -{refresh.removed}, "
+                    f"{refresh.embedded} chunks embedded; "
+                    f"LOOP import failures: {loops['failed']}")
             elif refresh.unchanged and not (
                     refresh.added or refresh.changed or refresh.removed):
                 out["message"] = (f"nothing changed: {refresh.unchanged} "
@@ -1751,10 +1859,109 @@ def import_standing_events(connection, schema: str,
     return report
 
 
+LOOP_EVENTS_REL = Path(".remembering") / "loops" / "events.jsonl"
+
+
+def import_loop_events(connection, schema: str,
+                       project_dir: Path) -> dict[str, Any]:
+    from remembering.loops import postgres as loops_pg
+    from remembering.loops.model import OpenLoopEvent
+
+    report: dict[str, Any] = {"imported": 0, "duplicates": 0,
+                              "failed": [], "events": 0, "loops": []}
+    path = Path(os.path.realpath(project_dir)) / LOOP_EVENTS_REL
+    if not path.is_file():
+        return report
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        report["failed"].append(f"{path}: unreadable: {exc}")
+        return report
+    for lineno, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as exc:
+            report["failed"].append(f"line {lineno}: not JSON: {exc}")
+            continue
+        received = raw.get("received_at") if isinstance(raw, dict) else None
+        if not isinstance(received, str) or not received.strip():
+            received = datetime.datetime.now(
+                datetime.timezone.utc).isoformat()
+        try:
+            event = OpenLoopEvent.from_dict(raw)
+        except (KeyError, TypeError, ValueError) as exc:
+            report["failed"].append(
+                f"line {lineno}: LOOP_EVENT_INVALID:malformed: {exc}")
+            continue
+        try:
+            out = loops_pg.append_event(connection, schema, event,
+                                        received)
+        except ValueError as exc:
+            code = str(exc).split(":", 1)[0]
+            report["failed"].append(
+                f"line {lineno}: {code}:{event.event_id}")
+            continue
+        if out.get("duplicate"):
+            report["duplicates"] += 1
+        else:
+            report["imported"] += 1
+    report["events"] = loops_pg.event_count(connection, schema)
+    return report
+
+
+def load_loop_views(connection, schema: str, project_dir: Path,
+                    valid_at: str | None = None,
+                    known_at: str | None = None) -> dict[str, Any]:
+    """Project current loop states with temporal closure evidence."""
+    from remembering.baseline.storage import Store
+    from remembering.loops import postgres as loops_pg
+    from remembering.loops.evidence import make_resolver
+    from remembering.loops.reducer import project
+    from remembering.temporal import postgres as temporal_pg
+    from remembering.temporal.query import TemporalEngine
+
+    loops_pg.initialise(connection, schema)
+    events = loops_pg.load_events(connection, schema)
+    from psycopg import sql as _sql
+
+    try:
+        with connection.cursor() as cur:
+            cur.execute(_sql.SQL("SELECT source_id FROM {}.sources").format(
+                _sql.Identifier(schema)))
+            known = {row[0] for row in cur.fetchall()}
+    except Exception:
+        known = set()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(_sql.SQL(
+                "SELECT source_id, text FROM {}.chunks").format(
+                    _sql.Identifier(schema)))
+            texts: dict[str, list[str]] = {}
+            for source_id, text in cur.fetchall():
+                texts.setdefault(source_id, []).append(text or "")
+            source_texts = {source: "\n".join(parts)
+                            for source, parts in texts.items()}
+    except Exception:
+        source_texts = {}
+    temporal_log = temporal_pg.load_log(connection, schema)
+    from remembering.temporal.query import TemporalEngine
+
+    engine = TemporalEngine(temporal_log)
+    resolve = make_resolver(temporal=engine, known_sources=known,
+                            loop_events=events,
+                            source_texts=source_texts)
+    views = project(events, resolve, valid_at=valid_at, known_at=known_at)
+    return {"views": views, "events": events,
+            "versions": loops_pg.versions(connection, schema)}
+
+
 def apply_trust_gate(schema: str, project_dir: Path,
                      ranked: list, by_annotation: dict,
                      frame_control: str, route_value: str,
-                     trust_spec: dict, enforce: bool) -> dict[str, Any]:
+                     trust_spec: dict, enforce: bool,
+                     loop_meta: dict | None = None) -> dict[str, Any]:
     """Judge candidates; enforce only on influence. Returns the trust
     block (records, verdict ids, versions, latency). Nothing is hidden
     from the trace either way."""
@@ -1788,6 +1995,7 @@ def apply_trust_gate(schema: str, project_dir: Path,
     candidates: list[TrustCandidate] = []
     roles_by_id: dict[str, str] = {}
     restricted_by_id: dict[str, list] = {}
+    loop_meta = loop_meta or {}
     for chunk in ranked:
         annotation = by_annotation.get(chunk.chunk_id)
         rule, rule_id = match_rule(policy, chunk.source_id)
@@ -1795,7 +2003,10 @@ def apply_trust_gate(schema: str, project_dir: Path,
                         else policy.default_source_class)
         role = None
         claim = claims.get(chunk.source_id, {})
-        if claim.get("role"):
+        loop_claim = loop_meta.get(chunk.chunk_id, {})
+        if loop_claim.get("role"):
+            role = loop_claim["role"]
+        elif claim.get("role"):
             role = claim["role"]
         elif rule is not None:
             role = rule.role
@@ -1805,6 +2016,9 @@ def apply_trust_gate(schema: str, project_dir: Path,
         restricted_by_id[chunk.chunk_id] = list(
             rule.restricted_to if rule is not None else [])
         restricted = list((rule.restricted_to if rule is not None else ()))
+        derived = (loop_claim.get("derived_from")
+                   if loop_claim.get("derived_from") is not None
+                   else claim.get("derived_from", []))
         candidates.append(TrustCandidate(
             unit_id=chunk.chunk_id, source_id=chunk.source_id,
             project_id=schema, text=chunk.text,
@@ -1812,8 +2026,9 @@ def apply_trust_gate(schema: str, project_dir: Path,
             temporal_status=(annotation.status if annotation
                              else "not_modelled"),
             frame_control=frame_control,
-            claim_key=claim.get("claim_key", ""),
-            derived_from=tuple(claim.get("derived_from", [])),
+            claim_key=loop_claim.get("claim_key",
+                                     claim.get("claim_key", "")),
+            derived_from=tuple(derived),
             refuted_by=tuple(claim.get("refuted_by", [])),
             restricted_to=tuple(restricted)))
     derived_map = {c.source_id: list(c.derived_from) for c in candidates}
@@ -1942,6 +2157,7 @@ def apply_selection(schema: str, project_dir: Path,
                 f"non-ADMIT candidate {chunk.chunk_id} entered selection")
         framed = framed_by_id.get(chunk.chunk_id)
         claim = claims_map.get(chunk.source_id, {})
+        is_loop_pull = item.get("stage") == "loop-pull"
         selection_candidates.append(SelectionCandidate(
             chunk_id=chunk.chunk_id, source_id=chunk.source_id,
             text=item.get("text", chunk.text),
@@ -1961,10 +2177,14 @@ def apply_selection(schema: str, project_dir: Path,
             source_class=trust_classes.get(chunk.chunk_id,
                                            "informational"),
             role=trust_roles.get(chunk.chunk_id, "ordinary"),
-            claim_key=claim.get("claim_key", ""),
-            derived_from=tuple(claim.get("derived_from", [])),
+            claim_key=item.get("loop_claim_key") or claim.get(
+                "claim_key", ""),
+            derived_from=tuple(item.get("loop_derived_from")
+                               if item.get("loop_derived_from") is not None
+                               else claim.get("derived_from", [])),
             dispute_key=claim.get("dispute", ""),
             negative=bool(claim.get("negative", False)),
+            echo_exempt=bool(item.get("stage") == "loop-pull"),
             constraint_hit=constraint_hit(
                 item.get("text", chunk.text), constraints)))
 
@@ -2036,7 +2256,8 @@ def build_durable_trace(schema: str, canonical_dir: str, now: str,
                         trust_spec: dict, selection_spec: dict,
                         retrieval_trace: dict, temporal_block: dict,
                         frame_trace: dict, trust_block: dict,
-                        selection_block: dict, lifecycles: list,
+                        selection_block: dict, loop_block: dict,
+                        lifecycles: list,
                         pool_entries: list, content: str,
                         admitted: list, timings: dict,
                         versions: dict) -> dict:
@@ -2080,6 +2301,7 @@ def build_durable_trace(schema: str, canonical_dir: str, now: str,
             "frame": frame_trace,
             "trust": trust_block,
             "selection": selection_block,
+            "loops": loop_block,
         },
         "candidates": lifecycles,
         "candidate_pool": {
@@ -2122,6 +2344,14 @@ def collect_versions(ret: dict, emb: dict, versions: dict,
         ESTABLISHMENT_POLICY_VERSION,
         FRAME_CONTROL_POLICY_VERSION,
         FRAMING_ENGINE_VERSION,
+    )
+    from remembering.loops.model import (
+        LOOP_CLOSURE_VERSION,
+        LOOP_CONTEXT_VERSION,
+        LOOP_ENGINE_VERSION,
+        LOOP_EVAL_VERSION,
+        LOOP_EVENT_SCHEMA,
+        LOOP_REDUCER_VERSION,
     )
     from remembering.select.model import (
         BUDGET_POLICY_VERSION,
@@ -2181,6 +2411,14 @@ def collect_versions(ret: dict, emb: dict, versions: dict,
             "budget_version": BUDGET_POLICY_VERSION,
             "redundancy_version": REDUNDANCY_POLICY_VERSION,
             "provenance_version": PROVENANCE_POLICY_VERSION,
+        },
+        "loops": {
+            "loops_engine_version": LOOP_ENGINE_VERSION,
+            "event_schema_version": LOOP_EVENT_SCHEMA,
+            "reducer_version": LOOP_REDUCER_VERSION,
+            "closure_version": LOOP_CLOSURE_VERSION,
+            "context_version": LOOP_CONTEXT_VERSION,
+            "eval_version": LOOP_EVAL_VERSION,
         },
         "trace": {
             "trace_engine_version": TRACE_ENGINE_VERSION,
@@ -2390,6 +2628,90 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
                 "objective_expansion": expansion_ms,
             }
 
+    # Relevant open-loop pull (influence only): durable unfinished
+    # work relevant to the current objective joins the pool as derived
+    # candidates with provenance. They flow through temporal, trust,
+    # and selection like everything else — no invisible channel.
+    # Recall never pulls loops; history questions use memory_open_loops.
+    loop_block: dict[str, Any] = {"considered": [], "states": {},
+                                  "derived_ids": [],
+                                  "search_complete": True,
+                                  "reason": "loops.recall_bypass"}
+    if decision.route.value == "influence":
+        from remembering.loops.context import (
+            loop_candidate,
+            relevant_loops,
+        )
+        from remembering.loops.model import LOOP_CONTEXT_VERSION
+
+        loop_started = time.perf_counter()
+        loop_connection = raw_connect()
+        try:
+            loop_loaded = load_loop_views(loop_connection, schema,
+                                          project_dir)
+        finally:
+            loop_connection.close()
+        loop_views = loop_loaded["views"]
+        objective_text = objective or (
+            query if isinstance(query, str) else "")
+        pool_sources = {c["source_id"] for c in pool_items}
+        relevant = relevant_loops(
+            loop_views, objective=objective_text,
+            evidence_sources=pool_sources, limit=3)
+        derived_ids: list[str] = []
+        for loop_id in relevant:
+            view = loop_views.get(loop_id)
+            if view is None:
+                continue
+            rendered = loop_candidate(view, pool_sources)
+            if any(c["chunk_id"] == rendered["chunk_id"]
+                   for c in pool_items):
+                continue
+            pool_items.append({
+                "chunk_id": rendered["chunk_id"],
+                "source_id": rendered["source_id"],
+                "section": None,
+                "rank": len(pool_items) + 1,
+                "score": 0.0,
+                "text": rendered["text"],
+                "lexical_rank": None,
+                "dense_rank": None,
+                "stage": "loop-pull",
+                "loop_claim_key": rendered["claim_key"],
+                "loop_derived_from": rendered["derived_from"],
+                "loop_role": rendered["role"],
+            })
+            derived_ids.append(rendered["chunk_id"])
+        loop_block = {
+            "considered": sorted(loop_views.keys()),
+            "states": {lid: view.state.value
+                       for lid, view in loop_views.items()},
+            "derived_ids": derived_ids,
+            "search_complete": True,
+            "evidence_boundary": "loop events + temporal log + pool "
+                                 "sources",
+            "reason": "loops.pulled" if derived_ids else "loops.no_match",
+            "projection_version": loop_loaded["versions"].get(
+                "projection_version"),
+            "context_version": LOOP_CONTEXT_VERSION,
+            "latency_ms": round(
+                (time.perf_counter() - loop_started) * 1000, 2),
+        }
+    retrieval_paths["loop_derived_ids"] = loop_block["derived_ids"]
+
+    loop_claims: dict[str, dict] = {}
+    loop_meta: dict[str, dict] = {}
+    for item in pool_items:
+        if item.get("stage") != "loop-pull":
+            continue
+        loop_claims[item["source_id"]] = {
+            "claim_key": item.get("loop_claim_key", ""),
+            "derived_from": item.get("loop_derived_from", []),
+            "refuted_by": [],
+            "role": item.get("loop_role", "ordinary"),
+        }
+        loop_meta[item["chunk_id"]] = loop_claims[item["source_id"]]
+
     # Temporal interpretation runs after retrieval and before
     # admission: retrieval proposes, temporal admission decides
     # current standing. Rank, mtime, and arrival order confer nothing.
@@ -2477,7 +2799,7 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         frame_control=(frame_block.get("control", "query_only")
                        if frame_applied else "query_only"),
         route_value=decision.route.value, trust_spec=trust_spec,
-        enforce=enforce_trust)
+        enforce=enforce_trust, loop_meta=loop_meta)
     trust_block = trust_out["block"]
     trust_records = trust_out["records_by_id"]
     trust_classes = trust_out["classes_by_id"]
@@ -2502,7 +2824,7 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         enforce_trust=enforce_trust,
         constraints=(frame_block.get("project_constraints", [])
                      if frame_applied else []),
-        claims_map=trust_out["claims_map"],
+        claims_map={**trust_out["claims_map"], **loop_claims},
         max_chars=max_chars, max_results=max_results,
         retrieval_paths=retrieval_paths)
     selection_block = selection_out["block"]
@@ -2607,7 +2929,8 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
     frame_trace["latency_ms"] = frame_latency_ms
     frame_trace["retrieval_paths"] = retrieval_paths
     trace = {**trace, "temporal": temporal_block, "frame": frame_trace,
-             "trust": trust_block, "selection": selection_block}
+             "trust": trust_block, "selection": selection_block,
+             "loops": loop_block}
 
     # Durable ContextTrace: build the immutable record, persist it,
     # then hand the caller its content-addressed ID. Influence
@@ -2634,6 +2957,8 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
             paths.append("dense")
         if item["chunk_id"] in objective_ids:
             paths.append("objective")
+        if item.get("stage") == "loop-pull":
+            paths.append("loop")
         retrieval_index[item["chunk_id"]] = {
             "lexical_rank": item.get("lexical_rank"),
             "dense_rank": item.get("dense_rank"),
@@ -2685,7 +3010,7 @@ def do_context(payload: dict[str, Any]) -> dict[str, Any]:
         schema, canonical_dir, now, payload, route_block, standpoint_echo,
         work_spec, trust_spec, selection_spec, result["trace"],
         temporal_block, frame_trace, trust_block, selection_block,
-        lifecycles, pool_entries,
+        loop_block, lifecycles, pool_entries,
         "", admitted, timings, version_block)
     evidence = "\n\n---\n\n".join(parts)
     content = guidance + "\n\n---\n\n" + evidence if evidence else guidance
@@ -2988,6 +3313,16 @@ def do_trust_import(payload: dict[str, Any]) -> dict[str, Any]:
             **report}
 
 
+def do_frame_eval(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic Stage 4 frame contract (no services)."""
+    _ = payload
+    require_engine()
+    from remembering.frame.evaluation import evaluate_frame
+
+    report = evaluate_frame()
+    return {"ok": bool(report["passed"]), **report}
+
+
 def do_trust_eval(payload: dict[str, Any]) -> dict[str, Any]:
     """Deterministic Stage 5 trust contract + ladder (no services)."""
     _ = payload
@@ -3003,7 +3338,306 @@ def do_trust_eval(payload: dict[str, Any]) -> dict[str, Any]:
             "ladder": ladder}
 
 
+def do_loop_import(payload: dict[str, Any]) -> dict[str, Any]:
+    require_engine()
+    schema = schema_from(payload)
+    project_dir = project_directory_from(payload)
+    canonical_dir = canonical_project_dir(project_dir)
+    connection = raw_connect()
+    try:
+        with connection.cursor() as cur:
+            from psycopg import sql
+
+            cur.execute("SELECT to_regclass(%s)",
+                        (f"{schema}.open_loop_events",))
+            if cur.fetchone()[0] is None:
+                return {"ok": False, "schema": schema,
+                        "message": ("loop storage is not initialised; "
+                                    "run memory_setup or memory_refresh."),
+                        "imported": 0, "duplicates": 0, "failed": [],
+                        "events": 0, "loops": []}
+            cur.execute(
+                sql.SQL("SELECT value FROM {}.meta "
+                        "WHERE key = 'project.path'").format(
+                    sql.Identifier(schema)))
+            row = cur.fetchone()
+            if row is not None and row[0] != canonical_dir:
+                raise BridgeError(
+                    "SCHEMA_MISMATCH",
+                    f"schema {schema!r} is claimed by project {row[0]!r}.")
+        report = import_loop_events(connection, schema, project_dir)
+    finally:
+        connection.close()
+    ok = not report["failed"]
+    return {"ok": ok, "schema": schema,
+            "message": (f"imported {report['imported']} loop "
+                        f"event(s), {report['duplicates']} duplicate(s)"
+                        + ("" if ok else
+                           f"; failures: {report['failed']}")),
+            **report}
+
+
 def do_selection_eval(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic Stage 6 selection contract (no services)."""
+    _ = payload
+    require_engine()
+    from remembering.select.evaluation import evaluate_selection
+
+    report = evaluate_selection()
+    return {"ok": bool(report["passed"]), **report}
+
+
+def do_loops(payload: dict[str, Any]) -> dict[str, Any]:
+    """memory_open_loops: list | get | history over durable loop state."""
+    require_engine()
+    from remembering.loops.model import LOOP_ENGINE_VERSION
+    from remembering.loops.query import (
+        current_loops,
+        explain_loop,
+        filter_loops,
+    )
+
+    schema = schema_from(payload)
+    project_dir = project_directory_from(payload)
+    canonical_dir = canonical_project_dir(project_dir)
+    action = payload.get("action", "list")
+    if not isinstance(action, str) or action.strip().lower() not in (
+            "list", "get", "history"):
+        raise BridgeError(
+            "CONFIG_INVALID",
+            f"unknown loops action {payload.get('action')!r}: expected "
+            "'list', 'get' or 'history'.")
+    action = action.strip().lower()
+    limit = payload.get("limit", 20)
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise BridgeError("CONFIG_INVALID", "limit must be an integer")
+    limit = max(1, min(limit, 100))
+
+    connection = raw_connect()
+    try:
+        with connection.cursor() as cur:
+            from psycopg import sql
+
+            cur.execute("SELECT to_regclass(%s)",
+                        (f"{schema}.open_loop_events",))
+            if cur.fetchone()[0] is None:
+                return {"ok": True, "schema": schema, "action": action,
+                        "loops": [], "loop": None,
+                        "message": "loop storage is not initialised; "
+                                   "run memory_setup."}
+            cur.execute(
+                sql.SQL("SELECT value FROM {}.meta "
+                        "WHERE key = 'project.path'").format(
+                    sql.Identifier(schema)))
+            row = cur.fetchone()
+            if row is not None and row[0] != canonical_dir:
+                raise BridgeError(
+                    "SCHEMA_MISMATCH",
+                    f"schema {schema!r} is claimed by project {row[0]!r}.")
+        valid_at = payload.get("valid_at")
+        known_at = payload.get("known_at")
+        for label, value in (("valid_at", valid_at),
+                             ("known_at", known_at)):
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise BridgeError(
+                        "CONFIG_INVALID",
+                        f"{label} must be a non-empty string")
+                from remembering.temporal.ordering import (
+                    parse_ts as _parse_ts,
+                )
+
+                if _parse_ts(value.strip()) is None:
+                    raise BridgeError(
+                        "CONFIG_INVALID",
+                        f"TEMPORAL_BAD_TIMESTAMP:{label}={value!r}")
+        loaded = load_loop_views(connection, schema, project_dir,
+                                 valid_at=valid_at, known_at=known_at)
+    finally:
+        connection.close()
+    views = loaded["views"]
+    events = loaded["events"]
+    versions = loaded["versions"]
+
+    if action == "list":
+        state = payload.get("state")
+        if state is not None and not isinstance(state, str):
+            raise BridgeError("CONFIG_INVALID",
+                              "state filter must be a string")
+        include_uncertain = True
+        if state is not None and state.strip().lower() in (
+                "open", "uncertain", "completed", "cancelled",
+                "superseded"):
+            matched = filter_loops(
+                views, state=state.strip().lower(), limit=limit)
+        else:
+            if state is not None:
+                raise BridgeError(
+                    "CONFIG_INVALID",
+                    f"unknown loop state {state!r}.")
+            subject = payload.get("subject")
+            kind = payload.get("transition_kind")
+            matched = filter_loops(
+                views,
+                subject=subject if isinstance(subject, str) else None,
+                transition_kind=kind if isinstance(kind, str) else None,
+                limit=limit)
+            if state is None:
+                matched = [v for v in matched
+                           if v.state.value in ("open", "uncertain")]
+        return {"ok": True, "schema": schema, "action": "list",
+                "loops": [v.to_dict() for v in matched],
+                "versions": versions,
+                "engine_version": LOOP_ENGINE_VERSION}
+    loop_id = payload.get("loop_id")
+    if not isinstance(loop_id, str) or not loop_id.strip():
+        raise BridgeError("CONFIG_INVALID",
+                          f"action {action!r} requires loop_id")
+    loop_id = loop_id.strip()
+    view = views.get(loop_id)
+    if view is None:
+        return {"ok": False, "schema": schema, "action": action,
+                "message": "LOOP_NOT_FOUND", "loop": None}
+    return {"ok": True, "schema": schema, "action": action,
+            "loop": explain_loop(view, events),
+            "versions": versions,
+            "engine_version": LOOP_ENGINE_VERSION}
+
+
+def do_loop_eval(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic Stage 8 loop contract (no services)."""
+    _ = payload
+    require_engine()
+    from remembering.loops.evaluation import evaluate_loops
+
+    report = evaluate_loops()
+    return {"ok": bool(report["passed"]), **report}
+
+
+def do_loop_rebuild(payload: dict[str, Any]) -> dict[str, Any]:
+    """Delete and rebuild the derived loop projection from events."""
+    require_engine()
+    from remembering.loops import postgres as loops_pg
+    from remembering.loops.evidence import make_resolver
+    from remembering.loops.reducer import project
+    from remembering.temporal import postgres as temporal_pg
+    from remembering.temporal.query import TemporalEngine
+
+    schema = schema_from(payload)
+    project_dir = project_directory_from(payload)
+    canonical_dir = canonical_project_dir(project_dir)
+    connection = raw_connect()
+    try:
+        with connection.cursor() as cur:
+            from psycopg import sql
+
+            cur.execute(
+                sql.SQL("SELECT value FROM {}.meta "
+                        "WHERE key = 'project.path'").format(
+                    sql.Identifier(schema)))
+            row = cur.fetchone()
+            if row is not None and row[0] != canonical_dir:
+                raise BridgeError(
+                    "SCHEMA_MISMATCH",
+                    f"schema {schema!r} is claimed by project {row[0]!r}.")
+        before = load_loop_views(connection, schema, project_dir)
+        before_states = {lid: view.state.value
+                         for lid, view in before["views"].items()}
+        events = before["events"]
+        from psycopg import sql as _sql
+
+        with connection.cursor() as cur:
+            cur.execute(_sql.SQL("DELETE FROM {}.open_loops").format(
+                _sql.Identifier(schema)))
+        temporal_log = temporal_pg.load_log(connection, schema)
+        engine = TemporalEngine(temporal_log)
+        with connection.cursor() as cur:
+            cur.execute(_sql.SQL("SELECT source_id FROM {}.sources").format(
+                _sql.Identifier(schema)))
+            known = {row[0] for row in cur.fetchall()}
+        resolve = make_resolver(temporal=engine, known_sources=known,
+                                loop_events=events)
+        rebuilt = project(events, resolve)
+        loops_pg.write_projection(
+            connection, schema, list(rebuilt.values()))
+        after_states = {lid: view.state.value
+                        for lid, view in rebuilt.items()}
+        return {"ok": True, "schema": schema,
+                "loops": len(rebuilt),
+                "identical": before_states == after_states,
+                "before": before_states, "after": after_states}
+    finally:
+        connection.close()
+
+
+def do_loop_create(payload: dict[str, Any]) -> dict[str, Any]:
+    """Explicit structured loop creation (testing / later actions)."""
+    require_engine()
+    from remembering.loops import postgres as loops_pg
+    from remembering.loops.events import validate_transition_dict
+    from remembering.loops.model import OpenLoopEvent
+
+    schema = schema_from(payload)
+    project_dir = project_directory_from(payload)
+    canonical_dir = canonical_project_dir(project_dir)
+    transition_raw = payload.get("transition")
+    if not isinstance(transition_raw, dict):
+        raise BridgeError("CONFIG_INVALID",
+                          "loop-create requires a transition object")
+    try:
+        transition = validate_transition_dict({
+            **transition_raw, "project_id": schema})
+    except ValueError as exc:
+        raise BridgeError("CONFIG_INVALID", str(exc))
+    import datetime as _dt
+    import json as _json
+
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    custom_id = payload.get("event_id")
+    if custom_id is not None and (
+            not isinstance(custom_id, str) or not custom_id.strip()):
+        raise BridgeError("CONFIG_INVALID",
+                          "event_id must be a non-empty string")
+    event = OpenLoopEvent(
+        event_id=custom_id.strip() if isinstance(custom_id, str)
+        else f"{transition.loop_id}-created",
+        loop_id=transition.loop_id, project_id=schema,
+        event_type="LOOP_CREATED", event_time=transition.created_at or now,
+        recorded_at=now, evidence_refs=transition.evidence_refs,
+        payload=tuple((k, v) for k, v in {
+            "subject": transition.subject,
+            "transition_kind": transition.transition_kind,
+            "from_state": transition.from_state,
+            "expected_state": transition.expected_state,
+            "effective_from": transition.effective_from,
+            "supersedes_loop_id": transition.supersedes_loop_id,
+            "closure_kind": transition.closure_kind,
+            "closure": _json.dumps(
+                [r.to_dict() for r in transition.closure]),
+        }.items()))
+    connection = raw_connect()
+    try:
+        with connection.cursor() as cur:
+            from psycopg import sql
+
+            cur.execute(
+                sql.SQL("SELECT value FROM {}.meta "
+                        "WHERE key = 'project.path'").format(
+                    sql.Identifier(schema)))
+            row = cur.fetchone()
+            if row is not None and row[0] != canonical_dir:
+                raise BridgeError(
+                    "SCHEMA_MISMATCH",
+                    f"schema {schema!r} is claimed by project {row[0]!r}.")
+        loops_pg.initialise(connection, schema)
+        try:
+            out = loops_pg.append_event(connection, schema, event, now)
+        except ValueError as exc:
+            raise BridgeError("CONFIG_INVALID", str(exc))
+    finally:
+        connection.close()
+    return {"ok": True, "schema": schema, "loop_id": transition.loop_id,
+            "event_id": event.event_id, "duplicate": out["duplicate"]}
     """Deterministic Stage 6 selection contract (no services)."""
     _ = payload
     require_engine()
@@ -3461,23 +4095,6 @@ def _do_trace_diff(connection, schema: str,
                 "message": "TRACE_NOT_FOUND", "diff": None}
     return {"ok": True, "schema": schema,
             "diff": diff_traces(old, new)}
-    """Deterministic Stage 6 selection contract (no services)."""
-    _ = payload
-    require_engine()
-    from remembering.select.evaluation import evaluate_selection
-
-    report = evaluate_selection()
-    return {"ok": bool(report["passed"]), **report}
-
-
-def do_frame_eval(payload: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic Stage 4 frame contract (no services)."""
-    _ = payload
-    require_engine()
-    from remembering.frame.evaluation import evaluate_frame
-
-    report = evaluate_frame()
-    return {"ok": bool(report["passed"]), **report}
 
 
 def do_route_eval(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3685,6 +4302,16 @@ def main() -> None:
         result = do_trace(payload)
     elif action == "trace_eval":
         result = do_trace_eval(payload)
+    elif action == "loops":
+        result = do_loops(payload)
+    elif action == "loop_eval":
+        result = do_loop_eval(payload)
+    elif action == "loop_rebuild":
+        result = do_loop_rebuild(payload)
+    elif action == "loop_create":
+        result = do_loop_create(payload)
+    elif action == "loop_import":
+        result = do_loop_import(payload)
     else:
         raise BridgeError("CONFIG_INVALID",
                           f"unknown bridge action: {action}")

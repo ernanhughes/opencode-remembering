@@ -204,6 +204,13 @@ bun src/dev-cli.ts trace explain <trace-id> --candidate <chunk-id>
 bun src/dev-cli.ts trace replay <trace-id> --kind trust
 bun src/dev-cli.ts trace diff <trace-a> <trace-b>
 bun src/dev-cli.ts trace-eval
+bun src/dev-cli.ts loop-health
+bun src/dev-cli.ts loop-import
+bun src/dev-cli.ts loop-list --state open
+bun src/dev-cli.ts loop-show <loop-id>
+bun src/dev-cli.ts loop-history <loop-id>
+bun src/dev-cli.ts loop-eval
+bun src/dev-cli.ts loop-rebuild
 ```
 
 ## Tools
@@ -387,6 +394,39 @@ candidates, the smallest provenance-bearing set is selected:
 Disagreement is rendered in separate sections, never merged into
 fluent consensus. No LLM selector, no scalar importance score, no
 summarization. Recall preserves broadly instead of compressing.
+
+## Unfinished work (Stage 8)
+
+Open loops are expected transitions with evidence-tested closure —
+never TODO text. A loop names a subject, an expected change
+(`failing → passing`), and explicit closure requirements; later
+evidence satisfies, cancels, supersedes, or leaves it uncertain:
+
+- **Completion needs evidence.** An agent saying "done" never
+  closes a loop that requires observable verification. Cancellation
+  and supersession are explicit append-only events.
+- **Uncertainty is a state.** Missing refs, incomplete search, and
+  conflicting closure evidence yield `UNCERTAIN` — never invented
+  certainty in either direction.
+- **History differs from now.** Loop states resolve at
+  valid-time/known-time standpoints; "what was unfinished on
+  August 8" and "what remains now" can differ legitimately.
+- **Context stays selected.** Relevant open loops join the pool as
+  derived candidates with provenance and pass through framing,
+  trust, selection, and ContextTrace like everything else;
+  irrelevant loops never intrude.
+
+> **An open loop is not a TODO. It is an expected transition whose
+> closure can be tested against evidence.**
+
+> **No closure evidence is not the same as evidence of non-closure.**
+
+> **Derived loop state remains rebuildable from canonical evidence.**
+
+Manage loops with `memory_open_loops` (list/get/history),
+`.remembering/loops/events.jsonl` (import), and the `loop-*`
+development commands. Loop operational files are never ingested as
+ordinary evidence; session history still is.
 
 ## Durable ContextTrace (Stage 7)
 

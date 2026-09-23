@@ -77,6 +77,15 @@
 > No new policy, no readers, no scores. Traces are audit state, never
 > re-ingested memory.
 
+> Status 2026-09-24 (later still): **Stage 8 (unfinished work / open
+> loops) is implemented and verified live.** Expected transitions
+> with evidence-tested closure (OPEN/COMPLETED/CANCELLED/SUPERSEDED/
+> UNCERTAIN), append-only loop events, bitemporal standpoints,
+> `memory_open_loops`, and relevant-loop context integration through
+> the existing pipeline with ContextTrace audit. TODO text never
+> creates loops; claims never close them alone. No scheduler, no
+> scores, no consolidation, no learning.
+
 This repository has been bootstrapped far enough for OpenCode to take over implementation.
 
 The architectural decision is now fixed:

@@ -76,6 +76,23 @@ export type HealthReport = {
     retention: string;
     error?: string;
   };
+  loops: {
+    loops_engine_version: string;
+    store_version: string | null;
+    event_schema_version: string;
+    reducer_version: string;
+    closure_version: string;
+    ready: boolean;
+    event_count: number;
+    loop_count: number;
+    open: number;
+    completed: number;
+    cancelled: number;
+    superseded: number;
+    uncertain: number;
+    unresolved_evidence_refs: string[];
+    error?: string;
+  };
   selection: {
     select_engine_version: string;
     policy_version: string;
@@ -229,6 +246,46 @@ export type FrameBlock = {
 
 export type SelectionRequest = {
   mode?: "decisive" | "full";
+};
+
+export type LoopState = "open" | "completed" | "cancelled" | "superseded" | "uncertain";
+
+export type LoopAction = "list" | "get" | "history";
+
+export type LoopRequest = {
+  action?: LoopAction;
+  loop_id?: string;
+  state?: LoopState;
+  subject?: string;
+  transition_kind?: string;
+  limit?: number;
+};
+
+export type LoopView = {
+  loop_id: string;
+  subject: string;
+  transition_kind: string;
+  state: LoopState;
+  reason: string;
+  expected: Record<string, unknown>;
+  evidence_refs: string[];
+  closure: Record<string, unknown>;
+  history: Array<Record<string, unknown>>;
+  created_at: string;
+  resolved_at: string;
+  search_complete: boolean;
+};
+
+export type LoopEvaluation = {
+  ok: boolean;
+  categories: Record<
+    string,
+    { correct: number; total: number; failures: string[] }
+  >;
+  checks_total: number;
+  checks_passed: number;
+  passed: boolean;
+  eval_version: string;
 };
 
 export type TemporalStandpointRequest = {
@@ -444,6 +501,32 @@ function validateSelectionRequest(selection: SelectionRequest): void {
     throw new Error(
       `Invalid selection mode ${JSON.stringify(selection.mode)}: expected 'decisive' or 'full'.`,
     );
+  }
+}
+
+const LOOP_ACTIONS: LoopAction[] = ["list", "get", "history"];
+const LOOP_STATES: LoopState[] = ["open", "completed", "cancelled", "superseded", "uncertain"];
+
+function validateLoopRequest(request: LoopRequest): void {
+  const action = request.action ?? "list";
+  if (!LOOP_ACTIONS.includes(action)) {
+    throw new Error(
+      `Invalid loops action ${JSON.stringify(request.action)}: expected 'list', 'get' or 'history'.`,
+    );
+  }
+  if ((action === "get" || action === "history") && !request.loop_id?.trim()) {
+    throw new Error(`Loops action '${action}' requires loop_id.`);
+  }
+  if (request.state !== undefined && !LOOP_STATES.includes(request.state)) {
+    throw new Error(
+      `Invalid loop state ${JSON.stringify(request.state)}.`,
+    );
+  }
+  if (
+    request.limit !== undefined &&
+    (!Number.isInteger(request.limit) || request.limit < 1)
+  ) {
+    throw new Error("Loops limit must be a positive integer.");
   }
 }
 
@@ -711,6 +794,36 @@ export class ProjectMemoryClient {
 
   selectionEval(): Promise<TemporalEvaluation> {
     return this.call<TemporalEvaluation>("selection_eval");
+  }
+
+  loopEval(): Promise<LoopEvaluation> {
+    return this.call<LoopEvaluation>("loop_eval");
+  }
+
+  loopImport(): Promise<TemporalImportResult> {
+    return this.call<TemporalImportResult>("loop_import");
+  }
+
+  loopRebuild(): Promise<Record<string, unknown>> {
+    return this.call<Record<string, unknown>>("loop_rebuild");
+  }
+
+  loopCreate(transition: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (
+      !transition ||
+      typeof transition !== "object" ||
+      Array.isArray(transition)
+    ) {
+      throw new Error("loop-create requires a transition object.");
+    }
+    return this.call<Record<string, unknown>>("loop_create", {
+      transition,
+    });
+  }
+
+  async openLoops(request: LoopRequest = {}): Promise<Record<string, unknown>> {
+    validateLoopRequest(request);
+    return this.call<Record<string, unknown>>("loops", request);
   }
 
   traceEval(): Promise<TemporalEvaluation> {

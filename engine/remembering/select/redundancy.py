@@ -64,9 +64,14 @@ def group_candidates(candidates: list[SelectionCandidate],
                 reason="shared explicit claim key"))
 
     # Echo groups: shared derivation roots (same lineage, not
-    # independent). Singletons excluded.
+    # independent). Echo-exempt members (e.g. loop state assertions,
+    # which add state information beyond their cited roots) never
+    # collapse. Singletons excluded.
     root_members: dict[frozenset, list[str]] = {}
+    exempt = {c.chunk_id for c in candidates if c.echo_exempt}
     for candidate in candidates:
+        if candidate.chunk_id in exempt:
+            continue
         roots = roots_of(candidate.source_id)
         root_members.setdefault(roots, []).append(candidate.chunk_id)
     for roots in sorted(root_members, key=lambda r: sorted(r)):

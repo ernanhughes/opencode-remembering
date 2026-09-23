@@ -79,6 +79,7 @@ class SelectionCandidate:
     dispute_key: str = ""
     negative: bool = False
     constraint_hit: bool = False
+    echo_exempt: bool = False
 
 
 @dataclass

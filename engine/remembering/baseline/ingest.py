@@ -30,6 +30,13 @@ SKIP_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
     "dist", "build", "coverage", "target", ".next", ".turbo",
 }
+# Operational memory-system files are never ordinary evidence:
+# loop event files and trace exports live here, while canonical
+# session history under .remembering/sessions/ stays ingestible.
+SKIP_PATHS = (
+    (".remembering", "loops"),
+    (".remembering", "traces"),
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +90,13 @@ def discover(root: Path) -> list[Path]:
         if not path.is_file():
             continue
         if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        try:
+            relative = path.relative_to(root).as_posix().split("/")
+        except ValueError:
+            continue
+        if any(tuple(relative[:len(skip)]) == skip
+               for skip in SKIP_PATHS):
             continue
         if path.suffix.lower() in TEXT_SUFFIXES:
             found.append(path)

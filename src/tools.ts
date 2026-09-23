@@ -1,6 +1,7 @@
 import type { Info as ToolInfo } from "@opencode/plugin/promise/tool";
 
 import type {
+  LoopRequest,
   ProjectMemoryClient,
   RouteRequest,
   SelectionRequest,
@@ -232,6 +233,45 @@ export function MemoryTemporalImport(client: ProjectMemoryClient): ToolInfo {
     },
     async execute() {
       const result = await client.temporalImport();
+      return { content: JSON.stringify(result, null, 2) };
+    },
+  };
+}
+
+export function MemoryOpenLoops(client: ProjectMemoryClient): ToolInfo {
+  return {
+    name: "memory_open_loops",
+    description:
+      "Inspect durable unfinished work: list current open/uncertain loops " +
+      "with filters, or fetch one loop with its lifecycle history and " +
+      "closure explanation. Loops are expected transitions with " +
+      "evidence-tested closure — never TODO text.",
+    input: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "get", "history"] },
+        loop_id: { type: "string" },
+        state: {
+          type: "string",
+          enum: ["open", "completed", "cancelled", "superseded", "uncertain"],
+        },
+        subject: { type: "string" },
+        transition_kind: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    async execute(input) {
+      const args = input as LoopRequest & { action: "list" | "get" | "history" };
+      const result = await client.openLoops({
+        action: args.action ?? "list",
+        loop_id: args.loop_id,
+        state: args.state,
+        subject: args.subject,
+        transition_kind: args.transition_kind,
+        limit: args.limit,
+      });
       return { content: JSON.stringify(result, null, 2) };
     },
   };

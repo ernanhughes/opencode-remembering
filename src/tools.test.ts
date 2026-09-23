@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   ContextResult,
   HealthReport,
+  LoopRequest,
   ProjectMemoryClient,
   RefreshResult,
   SearchResult,
@@ -11,6 +12,7 @@ import type {
 import {
   MemoryContext,
   MemoryHealth,
+  MemoryOpenLoops,
   MemoryRefresh,
   MemorySearch,
   MemorySetup,
@@ -102,6 +104,22 @@ const HEALTH: HealthReport = {
     oldest_trace: null,
     newest_trace: null,
     retention: "indefinite",
+  },
+  loops: {
+    loops_engine_version: "loops-engine-v0.1",
+    store_version: "loop-store-v0.1",
+    event_schema_version: "loop-event-v0.1",
+    reducer_version: "loop-reducer-v0.1",
+    closure_version: "loop-closure-v0.1",
+    ready: true,
+    event_count: 1,
+    loop_count: 1,
+    open: 1,
+    completed: 0,
+    cancelled: 0,
+    superseded: 0,
+    uncertain: 0,
+    unresolved_evidence_refs: [],
   },
 };
 
@@ -557,6 +575,72 @@ describe("memory tools", () => {
       "verify",
     );
     expect(seen).toHaveLength(3);
+  });
+
+  test("memory_open_loops lists and gets loops", async () => {
+    const tool = MemoryOpenLoops(
+      fakeClient({
+        openLoops: async (request: LoopRequest) => {
+          if (request.action === "get") {
+            return {
+              ok: true,
+              schema: "s",
+              action: "get",
+              loop: { loop_id: "loop-1", state: "open" },
+            };
+          }
+          return {
+            ok: true,
+            schema: "s",
+            action: "list",
+            loops: [{ loop_id: "loop-1", state: "open" }],
+          };
+        },
+      }),
+    );
+    const listed = await tool.execute!(
+      { action: "list" } as never,
+      {} as never,
+    );
+    expect(
+      JSON.parse((listed as { content: string }).content).loops,
+    ).toHaveLength(1);
+    const gotten = await tool.execute!(
+      { action: "get", loop_id: "loop-1" } as never,
+      {} as never,
+    );
+    expect(
+      JSON.parse((gotten as { content: string }).content).loop.loop_id,
+    ).toBe("loop-1");
+  });
+
+  test("memory_open_loops validates input client-side", async () => {
+    const { ProjectMemoryClient } = await import("./client");
+    const client = new ProjectMemoryClient(
+      {
+        dsn: "postgresql://localhost:5432/x",
+        python: "python",
+        schema: "remembering_abc",
+        bridgePath: "bridge/remembering_bridge.py",
+        embedding: { provider: "ollama", model: "bge-m3", host: "x" },
+        retrieval: {
+          mode: "hybrid",
+          lexicalK: 1,
+          denseK: 1,
+          fusionK: 60,
+          rerankK: 1,
+          reranker: "none",
+        },
+        context: { autoInject: false, maxChars: 4000, maxResults: 6 },
+      },
+      process.cwd(),
+    );
+    await expect(client.openLoops({ action: "get" })).rejects.toThrow(
+      "loop_id",
+    );
+    await expect(
+      client.openLoops({ action: "list", state: "nope" as never }),
+    ).rejects.toThrow("state");
   });
 
   test("memory_trace rejects invalid modes client-side", async () => {

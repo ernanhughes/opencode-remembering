@@ -2435,6 +2435,315 @@ def test_trace_funnel_and_bundle_reconcile(tmp_path: Path) -> None:
         drop_schema(schema)
 
 
+# -- Stage 8 open loops (hashing + live PostgreSQL) ---------------------
+
+LOOP_A = {
+    "event_id": "task-a-created", "loop_id": "loop-a",
+    "event_type": "LOOP_CREATED",
+    "event_time": "2026-08-04T10:00:00Z",
+    "recorded_at": "2026-08-04T10:05:00Z",
+    "evidence_refs": ["task-a.md"],
+    "payload": {
+        "subject": "migration.foreign-key", "transition_kind": "VALIDATION",
+        "from_state": "failing", "expected_state": "passing",
+        "closure_kind": "all",
+        "closure": [{"type": "content_contains",
+                     "source_id": "test-fk.md", "text": "passes"}],
+    },
+}
+
+
+def loop_project(root: Path, events=None, closure=None):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "task-a.md").write_text(
+        "# Task\n\nAdd foreign key migration.\n", encoding="utf-8")
+    tdir = root / ".remembering" / "loops"
+    tdir.mkdir(parents=True, exist_ok=True)
+    if events is not None:
+        (tdir / "events.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in events) + "\n",
+            encoding="utf-8")
+        return root
+    loop_event = dict(LOOP_A)
+    if closure is not None:
+        loop_event = {**loop_event,
+                      "payload": {**loop_event["payload"],
+                                  "closure": closure}}
+    (tdir / "events.jsonl").write_text(
+        json.dumps(loop_event) + "\n", encoding="utf-8")
+    return root
+
+
+def loops_call(schema, root, **kwargs):
+    args = {"schema": schema, "project_directory": str(root),
+            "action": "list"}
+    args.update(kwargs)
+    return bridge.do_loops(args)
+
+
+@needs_pg
+def test_loop_import_health_list(tmp_path: Path) -> None:
+    schema = "remembering_it_limport"
+    drop_schema(schema)
+    try:
+        loop_project(tmp_path, closure=[])
+        setup = bridge.do_setup(payload(schema, tmp_path))
+        assert setup["ok"], setup.get("message")
+        assert setup["refresh"]["loops"]["imported"] == 1
+        again = bridge.do_loop_import(payload(schema, tmp_path))
+        assert (again["imported"], again["duplicates"]) == (0, 1)
+        listed = loops_call(schema, tmp_path)
+        assert listed["ok"] and len(listed["loops"]) == 1
+        assert listed["loops"][0]["state"] == "open"
+        health = bridge.doctor(payload(schema, tmp_path))
+        loops = health["loops"]
+        assert loops["ready"] is True
+        assert loops["event_count"] == 1
+        assert loops["open"] == 1
+        assert loops["event_schema_version"] == "loop-event-v0.1"
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_completion_claim_only_stays_open(tmp_path: Path) -> None:
+    schema = "remembering_it_lclaim"
+    drop_schema(schema)
+    try:
+        loop_project(tmp_path)
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        (tmp_path / "test-fk.md").write_text(
+            "# Test\n\nForeign key check FAILS.\n", encoding="utf-8")
+        assert bridge.do_refresh(payload(schema, tmp_path))["ok"]
+        listed = loops_call(schema, tmp_path)
+        assert listed["loops"][0]["state"] == "open"
+        assert listed["loops"][0]["reason"] == \
+            "loop.open.no_closure_evidence"
+        gotten = loops_call(schema, tmp_path, action="get",
+                            loop_id="loop-a")
+        assert gotten["loop"]["state"] == "open"
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_valid_completion(tmp_path: Path) -> None:
+    schema = "remembering_it_ldone"
+    drop_schema(schema)
+    try:
+        loop_project(tmp_path)
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        (tmp_path / "test-fk.md").write_text(
+            "# Test\n\nForeign key check passes.\n", encoding="utf-8")
+        assert bridge.do_refresh(payload(schema, tmp_path))["ok"]
+        out = bridge.do_loop_create({
+            "schema": schema, "project_directory": str(tmp_path),
+            "transition": {
+                "loop_id": "loop-b", "subject": "migration.foreign-key",
+                "transition_kind": "VALIDATION",
+                "created_at": "2026-08-04T10:00:00Z",
+                "evidence_refs": ["test-fk.md"],
+                "closure": [{"type": "evidence_present",
+                             "source_id": "test-fk.md"}]}})
+        assert out["ok"], out
+        listed = loops_call(schema, tmp_path, state="completed")
+        states = {loop["loop_id"]: loop["state"]
+                  for loop in listed["loops"]}
+        assert states.get("loop-b") == "completed", states
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_cancel_supersede_history(tmp_path: Path) -> None:
+    schema = "remembering_it_lcancel"
+    drop_schema(schema)
+    try:
+        events = [
+            {"event_id": "c-created", "loop_id": "loop-c",
+             "event_type": "LOOP_CREATED",
+             "event_time": "2026-08-01T10:00:00Z",
+             "recorded_at": "2026-08-01T10:05:00Z",
+             "payload": {"subject": "docs.notes",
+                         "transition_kind": "DELIVERABLE"}},
+            {"event_id": "c-cancel", "loop_id": "loop-c",
+             "event_type": "LOOP_CANCELLED",
+             "event_time": "2026-08-05T10:00:00Z",
+             "recorded_at": "2026-08-05T10:05:00Z"},
+        ]
+        loop_project(tmp_path, events=events)
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        listed = loops_call(schema, tmp_path)
+        assert listed["loops"] == []
+        history = loops_call(schema, tmp_path, action="history",
+                             loop_id="loop-c")
+        assert history["loop"]["state"] == "cancelled"
+        assert len(history["loop"]["history"]) == 2
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_rebuild_identical(tmp_path: Path) -> None:
+    schema = "remembering_it_lrebuild"
+    drop_schema(schema)
+    try:
+        loop_project(tmp_path)
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        rebuilt = bridge.do_loop_rebuild(payload(schema, tmp_path))
+        assert rebuilt["ok"] and rebuilt["identical"] is True
+        assert rebuilt["loops"] >= 1
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_conflict_and_isolation(tmp_path: Path) -> None:
+    schema = "remembering_it_lconflict"
+    drop_schema(schema)
+    try:
+        (tmp_path / "x.md").write_text("x\n", encoding="utf-8")
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        bad = {"event_id": "x-1", "loop_id": "x-1",
+               "event_type": "LOOP_CREATED", "event_time": "bad",
+               "recorded_at": "2026-08-01T10:05:00Z",
+               "payload": {"subject": "s", "transition_kind": "TASK"}}
+        tdir = tmp_path / ".remembering" / "loops"
+        tdir.mkdir(parents=True, exist_ok=True)
+        (tdir / "events.jsonl").write_text(json.dumps(bad) + "\n",
+                                           encoding="utf-8")
+        report = bridge.do_loop_import(payload(schema, tmp_path))
+        assert report["ok"] is False and report["failed"]
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_project_isolation(tmp_path: Path) -> None:
+    schema_a = "remembering_it_liso_a"
+    schema_b = "remembering_it_liso_b"
+    for schema in (schema_a, schema_b):
+        drop_schema(schema)
+    try:
+        dir_a = loop_project(tmp_path / "a")
+        dir_b = tmp_path / "b"
+        dir_b.mkdir()
+        (dir_b / "b.md").write_text("unrelated\n", encoding="utf-8")
+        assert bridge.do_setup(payload(schema_a, dir_a))["ok"]
+        assert bridge.do_setup(payload(schema_b, dir_b))["ok"]
+        listed_b = loops_call(schema_b, dir_b)
+        assert listed_b["loops"] == []
+        with pytest.raises(bridge.BridgeError) as exc:
+            bridge.do_loops({"schema": schema_a,
+                             "project_directory": str(dir_b),
+                             "action": "list"})
+        assert exc.value.code == "SCHEMA_MISMATCH"
+    finally:
+        drop_schema(schema_a)
+        drop_schema(schema_b)
+
+
+@needs_pg
+def test_loop_todo_prose_creates_nothing(tmp_path: Path) -> None:
+    # K/L: TODO text and discussion prose create no loops.
+    schema = "remembering_it_ltodo"
+    drop_schema(schema)
+    try:
+        (tmp_path / "code.py").write_text(
+            "# TODO: perhaps improve this someday\nx = 1\n",
+            encoding="utf-8")
+        (tmp_path / "chat.md").write_text(
+            "We could replace this with Redis later.\n", encoding="utf-8")
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        listed = loops_call(schema, tmp_path)
+        assert listed["loops"] == []
+        health = bridge.doctor(payload(schema, tmp_path))
+        assert health["loops"]["loop_count"] == 0
+        assert health["ok"], health.get("message")
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_files_not_ingested_sessions_kept(tmp_path: Path) -> None:
+    # Y: loop operational files never become sources; sessions still do.
+    schema = "remembering_it_lnoingest"
+    drop_schema(schema)
+    try:
+        loop_project(tmp_path)
+        sdir = tmp_path / ".remembering" / "sessions"
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "ses-1.json").write_text(
+            json.dumps({"events": []}), encoding="utf-8")
+        report = bridge.do_setup(payload(schema, tmp_path))
+        assert report["ok"], report.get("message")
+        conn = psycopg.connect(DSN, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'SELECT source_id FROM "{schema}".sources')
+                sources = {row[0] for row in cur.fetchall()}
+        finally:
+            conn.close()
+        assert not any("loops/" in s for s in sources), sources
+        assert any("sessions/" in s for s in sources), sources
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_relevant_enters_context(tmp_path: Path) -> None:
+    # T: relevant loop becomes a derived candidate through the stack.
+    schema = "remembering_it_lctx"
+    drop_schema(schema)
+    try:
+        loop_project(tmp_path)
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        (tmp_path / "migrate.md").write_text(
+            "# Migrate\n\nForeign key migration work notes.\n",
+            encoding="utf-8")
+        assert bridge.do_refresh(payload(schema, tmp_path))["ok"]
+        bundle = bridge.do_context(payload(
+            schema, tmp_path,
+            query="Prepare the foreign key migration for release.",
+            route="influence", max_chars=4000, max_results=8,
+            work={"mode": "none"}))
+        loop_items = [i for i in bundle["items"]
+                      if i["source_id"].startswith("loop:")]
+        assert loop_items, [i["source_id"] for i in bundle["items"]]
+        assert bundle["trace"]["loops"]["derived_ids"]
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_irrelevant_stays_out(tmp_path: Path) -> None:
+    # U: unrelated work does not intrude.
+    schema = "remembering_it_lquiet"
+    drop_schema(schema)
+    try:
+        loop_project(tmp_path)
+        assert bridge.do_setup(payload(schema, tmp_path))["ok"]
+        (tmp_path / "garden.md").write_text(
+            "# Garden\n\nNotes about roses and soil.\n", encoding="utf-8")
+        assert bridge.do_refresh(payload(schema, tmp_path))["ok"]
+        bundle = bridge.do_context(payload(
+            schema, tmp_path, query="How should I prune the roses?",
+            route="influence", max_chars=4000, max_results=8,
+            work={"mode": "none"}))
+        assert not [i for i in bundle["items"]
+                    if i["source_id"].startswith("loop:")]
+    finally:
+        drop_schema(schema)
+
+
+@needs_pg
+def test_loop_eval_contract(tmp_path: Path) -> None:
+    report = bridge.do_loop_eval(payload("remembering_it_le", tmp_path))
+    assert report["ok"] is True
+    assert (report["checks_passed"], report["checks_total"]) == (13, 13)
+
+
 @needs_pg
 @needs_ollama
 def test_ollama_dense_smoke_proves_real_vectors(tmp_path: Path) -> None:

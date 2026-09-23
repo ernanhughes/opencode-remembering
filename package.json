@@ -34,6 +34,9 @@
     "trust-eval": "bun src/dev-cli.ts trust-eval",
     "selection-eval": "bun src/dev-cli.ts selection-eval",
     "trace-eval": "bun src/dev-cli.ts trace-eval",
+    "loop-health": "bun src/dev-cli.ts loop-health",
+    "loop-import": "bun src/dev-cli.ts loop-import",
+    "loop-eval": "bun src/dev-cli.ts loop-eval",
     "bridge-tests": "python -m pytest bridge/ -v"
   },
   "dependencies": {

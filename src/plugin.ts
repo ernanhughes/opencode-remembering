@@ -7,6 +7,7 @@ import { buildContextHook, isSecurityFailure } from "./hook";
 import {
   MemoryContext,
   MemoryHealth,
+  MemoryOpenLoops,
   MemoryRefresh,
   MemorySearch,
   MemorySetup,
@@ -55,6 +56,7 @@ const RememberingPlugin = Plugin.define({
       MemoryState(client),
       MemoryTemporalImport(client),
       MemoryTrace(client),
+      MemoryOpenLoops(client),
     ];
 
     await ctx.tool.transform((editor) => {

@@ -19,7 +19,7 @@ import { loadConfig } from "./config";
 
 function usage(): never {
   console.error(
-    "usage: dev-cli.ts <doctor|setup|refresh|search|context|route-eval|temporal-import|temporal-state|temporal-eval|frame-health|frame-eval|trust-health|trust-import|trust-eval|trace|trace-eval> [query] [--dir <path>] [--route auto|recall|influence] [--temporal-mode MODE] [--valid-at ISO] [--known-at ISO] [--subject S] [--work-mode auto|explicit|none] [--work-type T] [--objective O] [--caller-scope S] [--trust-level FULL] [--selection decisive]",
+    "usage: dev-cli.ts <doctor|setup|refresh|search|context|route-eval|temporal-import|temporal-state|temporal-eval|frame-health|frame-eval|trust-health|trust-import|trust-eval|trace|trace-eval|loop-health|loop-import|loop-list|loop-show|loop-history|loop-eval|loop-rebuild|loop-create> [query] [--dir <path>] [--route auto|recall|influence] [--temporal-mode MODE] [--valid-at ISO] [--known-at ISO] [--subject S] [--work-mode auto|explicit|none] [--work-type T] [--objective O] [--caller-scope S] [--trust-level FULL] [--selection decisive]",
   );
   process.exit(2);
 }
@@ -84,6 +84,40 @@ const requestedWork =
         work_type: workType,
         objective: objectiveFlag,
       };
+function loopCreateArgs(): Record<string, unknown> {
+  const getFlag = (name: string): string | undefined => {
+    const flag = rawArgs.indexOf(name);
+    if (flag === -1) return undefined;
+    const value = rawArgs[flag + 1];
+    rawArgs.splice(flag, 2);
+    return value;
+  };
+  const loopId = rawArgs[1] ?? getFlag("--loop-id") ?? "";
+  const subject = getFlag("--subject") ?? "";
+  const kind =
+    (getFlag("--kind") as string | undefined) ?? "TASK";
+  const expected = getFlag("--expected") ?? "";
+  const fromState = getFlag("--from") ?? "";
+  const closureJson = getFlag("--closure") ?? "[]";
+  let closure: unknown = [];
+  try {
+    closure = JSON.parse(closureJson);
+  } catch {
+    console.error("loop-create --closure must be JSON");
+    process.exit(2);
+  }
+  return {
+    loop_id: loopId,
+    subject,
+    transition_kind: kind,
+    from_state: fromState,
+    expected_state: expected,
+    evidence_refs: [],
+    closure_kind: "all",
+    closure,
+  };
+}
+
 const rest = rawArgs.slice(1);
 
 function traceArgs(): import("./client").TraceRequest {
@@ -238,6 +272,41 @@ switch (command) {
     break;
   case "trace-eval":
     result = await client.traceEval();
+    break;
+  case "loop-health":
+    result = (await client.doctor()).loops;
+    break;
+  case "loop-import":
+    result = await client.loopImport();
+    break;
+  case "loop-list":
+    result = await client.openLoops({
+      action: "list",
+      state: (flagValue("--state") as "open" | undefined) ?? "open",
+      subject: flagValue("--subject"),
+      limit: flagValue("--limit") ? Number(flagValue("--limit")) : undefined,
+    });
+    break;
+  case "loop-show":
+    result = await client.openLoops({
+      action: "get",
+      loop_id: rawArgs[1] ?? flagValue("--loop-id") ?? "",
+    });
+    break;
+  case "loop-history":
+    result = await client.openLoops({
+      action: "history",
+      loop_id: rawArgs[1] ?? flagValue("--loop-id") ?? "",
+    });
+    break;
+  case "loop-eval":
+    result = await client.loopEval();
+    break;
+  case "loop-rebuild":
+    result = await client.loopRebuild();
+    break;
+  case "loop-create":
+    result = await client.loopCreate(loopCreateArgs());
     break;
   default:
     usage();
