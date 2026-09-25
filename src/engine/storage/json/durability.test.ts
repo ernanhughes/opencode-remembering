@@ -50,6 +50,23 @@ describe("JSONL crash tolerance", () => {
     expect(torn).toContain(`"subje`);
   });
 
+  test("recovery repairs the file: append-after-torn never corrupts history", async () => {
+    const file = path.join(dir, "events.jsonl");
+    await appendJsonLine(file, { eventId: "a" });
+    const tornBytes = `{"eventId":"b","subje`;
+    await fs.appendFile(file, tornBytes, "utf8");
+    // First read recovers and repairs the canonical file.
+    expect((await readJsonLines<{ eventId: string }>(file)).map((r) => r.eventId)).toEqual(["a"]);
+    // A later legitimate append must fuse onto the repaired prefix, not onto
+    // the torn bytes (which would create a mid-file corrupt line).
+    await appendJsonLine(file, { eventId: "c" });
+    const rows = await readJsonLines<{ eventId: string }>(file);
+    expect(rows.map((r) => r.eventId)).toEqual(["a", "c"]);
+    // Torn bytes quarantined exactly once despite two reads before the append.
+    const torn = await fs.readFile(`${file}.torn`, "utf8");
+    expect(torn).toBe(tornBytes);
+  });
+
   test("mid-file corruption still fails loudly", async () => {
     const file = path.join(dir, "events.jsonl");
     await appendJsonLine(file, { eventId: "a" });

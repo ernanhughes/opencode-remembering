@@ -174,4 +174,15 @@ describe("HTTP RPC ↔ SQL parity", () => {
     const source = await fs.readFile(STORES_TS, "utf8");
     expect(source).toContain(`rpc<{ ok: boolean }>(cfg, "remembering_health", { schema })`);
   });
+
+  test("write_counts totals actions, not action types", async () => {
+    // Regression guard for the count(*)-over-groups bug: with 27 remember +
+    // 8 correct the total must be 35 via sum(cnt), never the group count 2.
+    // (Full behavior proof needs a live stack; this pins the aggregation.)
+    const sql = await fs.readFile(SQL_FILE, "utf8");
+    const body = /CREATE\s+OR\s+REPLACE\s+FUNCTION\s+remembering_write_counts[\s\S]*?\$\$;/gi.exec(sql)?.[0] ?? "";
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain("sum(cnt)");
+    expect(body).not.toMatch(/SELECT\s+count\(\*\),\s*coalesce\(jsonb_object_agg/);
+  });
 });

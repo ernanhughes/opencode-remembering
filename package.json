@@ -10,7 +10,8 @@
   },
   "files": [
     "dist",
-    "remembering.example.json"
+    "remembering.example.json",
+    "sql/remembering-http-v1.sql"
   ],
   "scripts": {
     "build": "bun build ./index.ts --outdir ./dist --target node --format esm --packages external",

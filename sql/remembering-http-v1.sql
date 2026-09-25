@@ -617,7 +617,9 @@ DECLARE n_records int; n_actions int; by_action jsonb; last_at timestamptz;
 BEGIN
   PERFORM remembering_assert_schema(schema);
   EXECUTE format('SELECT count(*) FROM %I.memory_records', schema) INTO n_records;
-  EXECUTE format('SELECT count(*), coalesce(jsonb_object_agg(action, cnt), ''{}''::jsonb), max(last_at) FROM (SELECT action, count(*) AS cnt, max(created_at) AS last_at FROM %I.memory_actions GROUP BY 1) g', schema) INTO n_actions, by_action, last_at;
+  -- sum(cnt), not count(*): the subquery has one row per action type, so
+  -- count(*) would report the number of distinct actions, not total actions.
+  EXECUTE format('SELECT coalesce(sum(cnt), 0), coalesce(jsonb_object_agg(action, cnt), ''{}''::jsonb), max(last_at) FROM (SELECT action, count(*) AS cnt, max(created_at) AS last_at FROM %I.memory_actions GROUP BY 1) g', schema) INTO n_actions, by_action, last_at;
   RETURN jsonb_build_object('records', n_records, 'actions', coalesce(n_actions, 0), 'byAction', coalesce(by_action, '{}'::jsonb), 'lastActionAt', last_at);
 END;
 $$;

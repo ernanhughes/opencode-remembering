@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /** Atomic filesystem helpers for the JSON backend. */
 
@@ -90,54 +91,86 @@ export async function tornQuarantinedBytes(storeDir: string): Promise<number> {
 }
 
 export async function readJsonLines<T>(file: string): Promise<T[]> {
-  let content: string;
-  try {
-    content = await fs.readFile(file, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  const endsNewline = content.endsWith("\n");
-  const lines = content.split("\n");
-  const out: T[] = [];
-  // The last split element is "" when the file ends with a newline.
-  const lastIndex = lines.length - (endsNewline ? 1 : 0);
-  for (let i = 0; i < lastIndex; i++) {
-    const line = lines[i] as string;
-    if (!line.trim()) continue;
-    const isTail = i === lastIndex - 1 && !endsNewline;
+  // Repair runs under the per-file lock, which is re-entrant (see
+  // withFileLock): append paths already hold this file's lock when they read,
+  // so recovery and append can never race into valid+torn+new corruption.
+  return withFileLock(file, async () => {
+    let content: string;
     try {
-      out.push(JSON.parse(line) as T);
-    } catch {
-      if (isTail) {
+      content = await fs.readFile(file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const endsNewline = content.endsWith("\n");
+    const lines = content.split("\n");
+    // The last split element is "" when the file ends with a newline.
+    const lastIndex = lines.length - (endsNewline ? 1 : 0);
+    const out: T[] = [];
+    // Byte offset of each line start, for truncating before a torn tail.
+    const offsets: number[] = [];
+    let cursor = 0;
+    for (let i = 0; i < lines.length; i++) {
+      offsets.push(cursor);
+      cursor += (lines[i] as string).length + 1;
+    }
+    for (let i = 0; i < lastIndex; i++) {
+      const line = lines[i] as string;
+      if (!line.trim()) continue;
+      const isTail = i === lastIndex - 1 && !endsNewline;
+      try {
+        out.push(JSON.parse(line) as T);
+      } catch {
+        if (!isTail) {
+          // A complete record that fails to parse is data corruption, not a
+          // crash tear: fail loudly, never silently drop history.
+          throw new Error(`corrupt JSONL at ${file}:${i + 1}`);
+        }
         // Torn final record: the process died mid-append. Quarantine the
-        // bytes for forensics and return the intact prefix instead of
-        // treating the whole store as corrupt. Mid-file corruption still
-        // throws: a complete record that fails to parse is data corruption,
-        // not a crash tear.
+        // bytes for forensics AND repair the canonical file to the valid
+        // prefix, so a later append cannot fuse valid+torn+new into a
+        // mid-file corrupt line. Quarantine-then-repair runs atomically
+        // under the file lock, so repeated reads quarantine exactly once.
+        const tornOffset = offsets[i] as number;
+        const prefix = content.slice(0, tornOffset);
         try {
           await fs.appendFile(`${file}.torn`, line, "utf8");
           await logRecovery(path.dirname(file), "torn-tail-quarantined", `${file}`);
         } catch { /* quarantine best effort */ }
+        try {
+          await atomicWriteFile(file, prefix);
+        } catch {
+          // Repair best effort: the prefix is still returned; the next read
+          // retries the truncate. Never lose parsed records over this.
+        }
         continue;
       }
-      throw new Error(`corrupt JSONL at ${file}:${i + 1}`);
     }
-  }
-  return out;
+    return out;
+  });
 }
 
-/** Minimal async mutex per store file to serialize overlapping OpenCode ops. */
+/**
+ * Minimal async mutex per store file to serialize overlapping OpenCode ops.
+ * Re-entrant within one async context (tracked via AsyncLocalStorage): store
+ * append paths hold a file lock while reading through it, and recovery runs
+ * under the same lock, so nested acquisition must not deadlock.
+ */
 const locks = new Map<string, Promise<void>>();
+const heldKeys = new AsyncLocalStorage<Set<string>>();
 
 export async function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  if (heldKeys.getStore()?.has(key)) return fn();
   const prior = locks.get(key) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => { release = resolve; });
   locks.set(key, prior.then(() => current));
   await prior;
+  const store = heldKeys.getStore();
+  const next = new Set(store ?? []);
+  next.add(key);
   try {
-    return await fn();
+    return await heldKeys.run(next, fn);
   } finally {
     release();
     if (locks.get(key) === current) locks.delete(key);

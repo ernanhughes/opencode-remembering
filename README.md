@@ -232,7 +232,10 @@ can never leave a mixed state such as actions-new/records-old: readers only ever
 see the last fully published generation, and orphan staging dirs are swept with a
 visible `recovery.jsonl` entry on the next initialise. Torn JSONL tails (a process
 dying mid-append without a trailing newline) are quarantined to `<file>.torn`
-with the intact prefix preserved; mid-file corruption still fails loudly.
+and the canonical file is repaired to the valid prefix under the same file
+lock — so a later append fuses onto clean history instead of producing a
+mid-file corrupt line, and repeated reads quarantine exactly once. Mid-file
+corruption still fails loudly.
 `memory_health` surfaces `torn_quarantined_bytes` and `recovery_events`.
 Cross-store note: the `memory://` chunk index converges via `writeRebuild`
 (refresh never prunes `memory://` sources).
