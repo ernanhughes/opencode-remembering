@@ -733,6 +733,24 @@ function validateTemporalRequest(temporal: TemporalStandpointRequest): void {
   }
 }
 
+function resolveEmbeddingAuth(config: RememberingConfig): { headers?: Record<string, string>; bearerToken?: string } {
+  const out: { headers?: Record<string, string>; bearerToken?: string } = {};
+  const headersEnv = (config.embedding as { headersEnv?: string }).headersEnv;
+  if (headersEnv) {
+    const raw = process.env[headersEnv];
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as Record<string, string>;
+        if (parsed && typeof parsed === "object") out.headers = parsed;
+      } catch { /* fail closed at request time, not here */ }
+    }
+  }
+  const tokenEnv = (config.embedding as { authTokenEnv?: string }).authTokenEnv;
+  if (tokenEnv && process.env[tokenEnv]) out.bearerToken = process.env[tokenEnv];
+  else if (process.env.REMEMBERING_EMBEDDING_AUTH_TOKEN) out.bearerToken = process.env.REMEMBERING_EMBEDDING_AUTH_TOKEN;
+  return out;
+}
+
 export class ProjectMemoryClient {
   private readonly engine: RememberingEngine;
 
@@ -741,14 +759,26 @@ export class ProjectMemoryClient {
     private readonly projectDirectory: string,
     engineOverride?: RememberingEngine,
   ) {
+    const embeddingAuth = resolveEmbeddingAuth(config);
     this.engine = engineOverride ?? new RememberingEngine({
       dsn: config.dsn,
       schema: config.schema,
       projectDirectory,
+      projectId: config.projectId,
+      storage: config.storage ? {
+        mode: config.storage.mode,
+        primary: config.storage.primary,
+        httpUrl: config.storage.http.url,
+        httpTokenEnv: config.storage.http.tokenEnv,
+        httpTimeoutMs: config.storage.http.timeoutMs,
+        jsonPath: config.storage.json.path,
+      } : { mode: "postgres" },
       embedding: {
         provider: config.embedding.provider as "ollama" | "sentence-transformers" | "hashing",
         model: config.embedding.model,
         host: config.embedding.host,
+        ...(embeddingAuth.headers ? { headers: embeddingAuth.headers } : {}),
+        ...(embeddingAuth.bearerToken ? { bearerToken: embeddingAuth.bearerToken } : {}),
       },
       retrieval: {
         mode: config.retrieval.mode,

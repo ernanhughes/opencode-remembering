@@ -1,4 +1,9 @@
 export { ENGINE_VERSION, SCHEMA_VERSION, BaselineStore } from "./storage";
+export * from "./storage/ports";
+export * from "./storage/project";
+export * from "./storage/factory";
+export { JsonBaselineStore, JsonTemporalStore, JsonStandingStore, JsonTraceStore, JsonLoopStore, JsonWriteStore } from "./storage/json/stores";
+export { HttpBaselineStore, HttpTemporalStore, HttpStandingStore, HttpTraceStore, HttpLoopStore, HttpWriteStore } from "./storage/http/stores";
 export { buildEmbedder, checkOllamaModel, cosine, HashingEmbedder, OllamaEmbeddingProvider } from "./embeddings";
 export type { EmbeddingProvider, EmbeddingResult, EmbeddingSpec } from "./embeddings";
 export { EngineError, assertSchemaName, classifyConnectionError, redactDsn } from "./errors";

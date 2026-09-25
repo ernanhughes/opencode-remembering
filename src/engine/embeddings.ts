@@ -15,13 +15,13 @@ export interface EmbeddingProvider {
   version(): string;
 }
 
-async function postJson(url: string, payload: unknown, timeoutMs = 300_000): Promise<unknown> {
+async function postJson(url: string, payload: unknown, timeoutMs = 300_000, headers: Record<string, string> = {}): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
@@ -49,14 +49,24 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   constructor(
     private readonly model: string,
     private readonly host = "http://localhost:11434",
+    private readonly auth: { headers?: Record<string, string>; bearerToken?: string } = {},
   ) {}
+
+  /** Headers actually sent. Never include in logs/traces/errors. */
+  private requestHeaders(): Record<string, string> {
+    const out: Record<string, string> = { ...(this.auth.headers ?? {}) };
+    if (this.auth.bearerToken && !out["Authorization"]) {
+      out["Authorization"] = `Bearer ${this.auth.bearerToken}`;
+    }
+    return out;
+  }
 
   async embed(texts: string[]): Promise<EmbeddingResult> {
     const host = this.host.replace(/\/$/, "");
     const payload = await postJson(`${host}/api/embed`, {
       model: this.model,
       input: texts,
-    });
+    }, 300_000, this.requestHeaders());
     const embeddings = (payload as { embeddings?: unknown }).embeddings;
     if (!Array.isArray(embeddings) || embeddings.length === 0) {
       throw new EngineError("EMBEDDING_UNREACHABLE", "Ollama returned no embeddings.");
@@ -108,10 +118,13 @@ export type EmbeddingSpec = {
   model: string;
   host: string;
   dimension?: number;
+  /** Extra HTTP headers for remote endpoints (from secure env config). Never logged. */
+  headers?: Record<string, string>;
+  bearerToken?: string;
 };
 
 export function buildEmbedder(spec: EmbeddingSpec): EmbeddingProvider {
-  if (spec.provider === "ollama") return new OllamaEmbeddingProvider(spec.model, spec.host);
+  if (spec.provider === "ollama") return new OllamaEmbeddingProvider(spec.model, spec.host, { headers: spec.headers, bearerToken: spec.bearerToken });
   if (spec.provider === "hashing") {
     if (process.env.REMEMBERING_ALLOW_TEST_EMBEDDINGS !== "1") {
       throw new EngineError(

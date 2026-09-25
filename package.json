@@ -1,7 +1,7 @@
 {
   "name": "opencode-remembering",
   "version": "0.0.1",
-  "description": "OpenCode integration for Project Memory using PostgreSQL and pgvector.",
+  "description": "OpenCode plugin for Project Memory with replaceable storage (PostgreSQL/pgvector, HTTP REST/RPC, or local JSON fallback).",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
@@ -44,7 +44,9 @@
     "native:search": "bun src/native-cli.ts search"
   },
   "dependencies": {
-    "@opencode/plugin": "^2.0.12",
+    "@opencode/plugin": "^2.0.12"
+  },
+  "optionalDependencies": {
     "pg": "^8.13.1"
   },
   "devDependencies": {

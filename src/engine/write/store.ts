@@ -7,6 +7,7 @@ export interface WriteStore {
   initialise(): Promise<void>;
   putRecord(record: MemoryRecord): Promise<void>;
   getRecord(recordId: string): Promise<MemoryRecord | null>;
+  listRecords?(): Promise<MemoryRecord[]>;
   updateRecordState(recordId: string, state: MemoryRecord["state"]): Promise<void>;
   putAction(action: MemoryActionRecord): Promise<void>;
   getAction(actionId: string): Promise<MemoryActionRecord | null>;
@@ -21,6 +22,9 @@ export class MemoryWriteStore implements WriteStore {
   async initialise(): Promise<void> {}
   async putRecord(record: MemoryRecord): Promise<void> {
     this.records.set(record.recordId, record);
+  }
+  async listRecords(): Promise<MemoryRecord[]> {
+    return [...this.records.values()];
   }
   async getRecord(recordId: string): Promise<MemoryRecord | null> {
     return this.records.get(recordId) ?? null;
@@ -91,6 +95,30 @@ export class PostgresWriteStore implements WriteStore {
           record.state, record.callerScope, record.origin, JSON.stringify(record.evidenceRefs),
           record.eventTime, record.effectiveFrom, record.createdAt],
       );
+    } finally {
+      client.release();
+    }
+  }
+  async listRecords(): Promise<MemoryRecord[]> {
+    const s = ident(this.schema);
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(`SELECT * FROM ${s}.memory_records ORDER BY created_at`);
+      return res.rows.map((r) => ({
+        recordId: (r as Record<string, unknown>)["record_id"] as string,
+        content: (r as Record<string, unknown>)["content"] as string,
+        role: (r as Record<string, unknown>)["role"] as MemoryRecord["role"],
+        sourceId: (r as Record<string, unknown>)["source_id"] as string,
+        lineageRoot: (r as Record<string, unknown>)["lineage_root"] as string,
+        standingCeiling: (r as Record<string, unknown>)["standing_ceiling"] as string,
+        state: (r as Record<string, unknown>)["state"] as MemoryRecord["state"],
+        callerScope: (r as Record<string, unknown>)["caller_scope"] as string,
+        origin: (r as Record<string, unknown>)["origin"] as string,
+        evidenceRefs: (() => { const v = (r as Record<string, unknown>)["evidence_refs"]; return (typeof v === "string" ? JSON.parse(v) : v) as string[]; })(),
+        eventTime: new Date((r as Record<string, unknown>)["event_time"] as string).toISOString(),
+        effectiveFrom: new Date((r as Record<string, unknown>)["effective_from"] as string).toISOString(),
+        createdAt: new Date((r as Record<string, unknown>)["created_at"] as string).toISOString(),
+      }));
     } finally {
       client.release();
     }

@@ -20,6 +20,8 @@ const SKIP_PATHS: string[][] = [
   [".remembering", "loops"],
   [".remembering", "traces"],
   [".remembering", "memory"],
+  [".remembering", "store"],
+  [".remembering", "sessions"],
   [".remembering", "write-policy.json"],
 ];
 

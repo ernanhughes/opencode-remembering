@@ -1,4 +1,4 @@
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import { assertSchemaName, classifyConnectionError, EngineError } from "./errors";
 
@@ -17,7 +17,17 @@ export function toRegclassParam(schema: string, relation: string): string {
 }
 
 export async function connectPool(dsn: string): Promise<Pool> {
-  const pool = new Pool({ connectionString: dsn, connectionTimeoutMillis: 10_000 });
+  // Lazy pg import: HTTP/JSON-only installs never load the driver.
+  let PgPool: new (config: { connectionString: string; connectionTimeoutMillis: number }) => Pool;
+  try {
+    ({ Pool: PgPool } = await import("pg"));
+  } catch {
+    throw new EngineError(
+      "DB_UNREACHABLE",
+      "direct PostgreSQL was requested but the optional 'pg' driver is not installed. Install it (bun add pg) or switch storage.mode to \"http\" or \"json\".",
+    );
+  }
+  const pool: Pool = new PgPool({ connectionString: dsn, connectionTimeoutMillis: 10_000 });
   try {
     const client = await pool.connect();
     client.release();

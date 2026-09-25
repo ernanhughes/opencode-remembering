@@ -79,11 +79,25 @@ opencode-remembering
 │       └── write/              explicit memory actions, write gate
 ```
 
-PostgreSQL + pgvector are **required infrastructure**. There is no SQLite fallback, no JSON-file vector store, and no Markdown-journal fallback. The hashing embedder is a deterministic test double, never a production retrieval model, and every layer refuses it unless explicitly opted in for local tests.
+PostgreSQL + pgvector remain the richest backend, but they are no longer required
+infrastructure. The engine now selects one authoritative store per operation:
+
+```text
+storage.mode = postgres  → direct pg driver (full pgvector/HNSW/transactions)
+storage.mode = http      → REST/RPC gateway in front of PostgreSQL/pgvector
+storage.mode = json      → local .remembering/store fallback (no server)
+storage.mode = auto      → try primary (http when configured, else postgres),
+                           fall back to JSON on availability failure only
+```
+
+The hashing embedder is a deterministic test double, never a production retrieval model, and every layer refuses it unless explicitly opted in for local tests.
 
 ## Quick start
 
-Prerequisites: Bun, a running PostgreSQL server with pgvector installed, and Ollama `bge-m3` for production embeddings. No interpreter, virtualenv, or package install beyond `bun install` — the memory engine is native TypeScript.
+Prerequisites: Bun, and for production embeddings Ollama `bge-m3` (local or remote
+over HTTPS). No interpreter, virtualenv, or package install beyond `bun install` —
+the memory engine is native TypeScript. The optional `pg` driver is only needed for
+`storage.mode = postgres`; HTTP/JSON installs never open a PostgreSQL connection.
 
 ```powershell
 git clone https://github.com/ernanhughes/opencode-remembering
@@ -133,7 +147,70 @@ Copy `remembering.example.json` to `~/.config/opencode/remembering.json` and adj
 }
 ```
 
-Only `dsn` usually needs attention. Without configuration the DSN defaults to `postgresql://postgres:postgres@localhost:5434/memory`. Environment overrides: `MEMORY_BASELINE_DSN`, `REMEMBERING_EMBEDDING_PROVIDER`, `REMEMBERING_EMBEDDING_MODEL`, `REMEMBERING_EMBEDDING_HOST`. An explicit `schema` overrides the derived per-project schema and must be a safe SQL identifier. Validation is strict: unknown providers/modes, unsafe schemas, and the `hashing` test double fail closed. A stale `project_memory_root` setting fails closed with migration guidance — the engine is native TypeScript and ships as compiled `dist/`.
+Only `dsn` usually needs attention for legacy installs. Without configuration the DSN defaults to `postgresql://postgres:postgres@localhost:5434/memory`. Environment overrides: `MEMORY_BASELINE_DSN`, `REMEMBERING_EMBEDDING_PROVIDER`, `REMEMBERING_EMBEDDING_MODEL`, `REMEMBERING_EMBEDDING_HOST`, `REMEMBERING_STORAGE_MODE`, `REMEMBERING_HTTP_URL`, `REMEMBERING_HTTP_TOKEN`, `REMEMBERING_JSON_PATH`, `REMEMBERING_PROJECT_ID`. An explicit `schema` overrides the derived per-project schema and must be a safe SQL identifier. Validation is strict: unknown providers/modes, unsafe schemas, and the `hashing` test double fail closed. A stale `project_memory_root` setting fails closed with migration guidance — the engine is native TypeScript and ships as compiled `dist/`.
+
+### Storage modes
+
+A top-level `dsn` alone keeps its old meaning: direct PostgreSQL. New installs
+should use the `storage` section:
+
+Local full PostgreSQL (unchanged behavior):
+
+```json
+{
+  "dsn": "postgresql://postgres:<password>@localhost:5432/memory_baseline",
+  "embedding": { "provider": "ollama", "model": "bge-m3", "host": "http://localhost:11434" }
+}
+```
+
+Portable JSON only (no database at all):
+
+```json
+{
+  "storage": { "mode": "json", "json": { "path": ".remembering/store" } },
+  "embedding": { "provider": "ollama", "model": "bge-m3", "host": "http://localhost:11434" }
+}
+```
+
+Remote REST/RPC PostgreSQL (no local PostgreSQL, no TCP):
+
+```json
+{
+  "storage": {
+    "mode": "http",
+    "http": { "url": "https://memory-db.example.com", "token_env": "REMEMBERING_HTTP_TOKEN" }
+  },
+  "embedding": { "provider": "ollama", "model": "bge-m3", "host": "https://embeddings.example.com" }
+}
+```
+
+Auto fallback (primary HTTP or postgres, JSON when unreachable):
+
+```json
+{
+  "storage": {
+    "mode": "auto",
+    "http": { "url": "https://memory-db.example.com", "token_env": "REMEMBERING_HTTP_TOKEN" },
+    "json": { "path": ".remembering/store" }
+  },
+  "embedding": { "provider": "ollama", "model": "bge-m3", "host": "https://embeddings.example.com" }
+}
+```
+
+Ollama embeddings already use `POST /api/embed` over HTTP, so a remote host just
+works. Optional `embedding.auth_token_env` (or `REMEMBERING_EMBEDDING_AUTH_TOKEN`)
+sends `Authorization: Bearer …`; headers/tokens are never logged, traced, or
+injected into model context.
+
+JSON retrieval is honest: lexical search is a BM25-like scorer; dense search is an
+in-process linear cosine scan over stored embeddings (not HNSW/pgvector). Hybrid
+fusion reuses the same RRF machinery. `memory_health` reports
+`storage: { configured_mode, active_backend, fallback, primary_reachable }` plus
+`capabilities` — fallback is never silent. Security/isolation failures
+(`SCHEMA_MISMATCH`, `STORE_PROJECT_MISMATCH`, `STORE_VERSION_MISMATCH`,
+`HTTP_BACKEND_AUTH`, `CONFIG_INVALID`) fail closed and never fall back to a
+different store. JSON data is never auto-merged back into PostgreSQL; an explicit
+migration command will come later.
 
 ## First run
 

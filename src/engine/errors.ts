@@ -61,3 +61,37 @@ export function redactDsn(value: string): string {
   if (!user) return `${scheme}://***@${suffix}`;
   return colon === -1 ? `${scheme}://${user}@${suffix}` : `${scheme}://${user}:***@${suffix}`;
 }
+
+/** Security/integrity failures must fail closed and never trigger JSON fallback. */
+export const SECURITY_FAILURE_CODES = new Set([
+  "SCHEMA_MISMATCH",
+  "STORE_PROJECT_MISMATCH",
+  "CONFIG_INVALID",
+  "FRAME_PROJECT_MISMATCH",
+  "HTTP_BACKEND_AUTH",
+  "STORE_VERSION_MISMATCH",
+]);
+
+export function isSecurityFailureCode(code: string | undefined): boolean {
+  return !!code && SECURITY_FAILURE_CODES.has(code);
+}
+
+export function isSecurityFailure(error: unknown): boolean {
+  const code = (error as { code?: string })?.code;
+  if (isSecurityFailureCode(code)) return true;
+  const message = String((error as Error)?.message ?? error);
+  return /SCHEMA_MISMATCH|STORE_PROJECT_MISMATCH|CONFIG_INVALID|FRAME_PROJECT_MISMATCH|HTTP_BACKEND_AUTH|STORE_VERSION_MISMATCH/.test(message);
+}
+
+/** Availability failures may trigger fallback to the JSON backend. */
+export function isAvailabilityFailure(error: unknown): boolean {
+  const code = (error as { code?: string })?.code;
+  return code === "DB_UNREACHABLE" || code === "DB_MISSING" || code === "HTTP_BACKEND_UNREACHABLE" || code === "HTTP_BACKEND_PROTOCOL" || code === "JSON_STORE_UNAVAILABLE" || code === "EMBEDDING_UNREACHABLE";
+}
+
+/** Strip bearer tokens / secrets from any string destined for logs or traces. */
+export function redactSecrets(value: string): string {
+  return value
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*(\s|$)/gi, "$1***$2")
+    .replace(/("?(authorization|api[_-]?key|token|secret)"?\s*[:=]\s*"?)[^",\s}]+/gi, "$1***");
+}

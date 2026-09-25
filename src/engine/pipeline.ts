@@ -1,34 +1,32 @@
-import { Pool } from "pg";
+import type { Pool } from "pg";
 
 import { resolveRoute, runPipelineStages, type MemoryRoute, type RouteRequest } from "./context";
 import { connectPool, ensureExtension, ident } from "./db";
 import { canonicalProjectDir, doctorBaseline } from "./doctor";
 import { buildEmbedder, type EmbeddingProvider, type EmbeddingSpec } from "./embeddings";
-import { assertSchemaName, EngineError } from "./errors";
+import { assertSchemaName, EngineError, isSecurityFailure } from "./errors";
 import { establishFrame, frameHealth } from "./frame/service";
 import { chunkSource, discover, parseFile, sha1, type ChunkingConfig, DEFAULT_CHUNKING } from "./ingest";
-import { MemoryLoopStore, PostgresLoopStore } from "./loops/store";
 import { reduceLoopEvents, validateLoopEvent, type LoopState } from "./loops/model";
 import { Retriever, type RetrievalConfig, type RetrievalTrace } from "./retrieval";
 import { BUDGET_VERSION, PROVENANCE_VERSION, REDUNDANCY_VERSION, SELECT_POLICY_VERSION } from "./selection/model";
-import { BaselineStore, readProjectMeta } from "./storage";
+import { readProjectMeta } from "./storage";
+import type { BaselineStorePort } from "./storage/ports";
+import { resolveStores, type ResolvedStores } from "./storage/factory";
 import { validateStandpoint } from "./temporal/model";
-import { reduceTemporalLog, resolveAtStandpoint } from "./temporal/reducer";
-import { MemoryTemporalStore, PostgresTemporalStore } from "./temporal/store";
+import { resolveAtStandpoint } from "./temporal/reducer";
 import { TemporalService } from "./temporal/service";
 import { createTrace, TRACE_ENGINE_VERSION, TRACE_SCHEMA_VERSION, TRACE_STORE_VERSION, REPLAY_PROTOCOL_VERSION, verifyTrace } from "./trace/model";
-import { MemoryTraceStore, PostgresTraceStore } from "./trace/store";
 import { TraceService } from "./trace/service";
 import { FRAMING_ENGINE_VERSION } from "./frame/model";
 import { INSTRUCTION_SCREEN_VERSION, TRUST_ENGINE_VERSION, type TrustLevel } from "./trust/model";
 import { builtinTrustPolicy, loadTrustPolicy } from "./trust/policy";
 import { resolveStanding, validateStandingEvent } from "./trust/standing";
-import { MemoryStandingStore, PostgresStandingStore, STANDING_STORE_VERSION } from "./trust/store";
+import { STANDING_STORE_VERSION } from "./trust/store";
 import { LOOP_CLOSURE_VERSION, LOOP_ENGINE_VERSION, LOOP_EVENT_SCHEMA, LOOP_REDUCER_VERSION, LOOP_STORE_VERSION } from "./loops/model";
 import { TEMPORAL_EVENT_SCHEMA, TEMPORAL_REDUCER_VERSION, TEMPORAL_STORE_VERSION } from "./temporal/model";
 import { builtinWritePolicy, loadWritePolicy } from "./write/policy";
 import { WriteService, type WriteInput } from "./write/service";
-import { MemoryWriteStore, PostgresWriteStore } from "./write/store";
 import { ACTION_SCHEMA_VERSION, RECORD_SCHEMA_VERSION, RELATION_VERSION, WRITE_ENGINE_VERSION, WRITE_STORE_VERSION } from "./write/model";
 
 export type EngineOptions = {
@@ -38,6 +36,15 @@ export type EngineOptions = {
   embedding: EmbeddingSpec;
   retrieval: RetrievalConfig;
   chunking?: ChunkingConfig;
+  projectId?: string;
+  storage?: {
+    mode?: string;
+    primary?: "postgres" | "http";
+    httpUrl?: string | null;
+    httpTokenEnv?: string;
+    httpTimeoutMs?: number;
+    jsonPath?: string;
+  };
 };
 
 export type RefreshReport = {
@@ -103,11 +110,12 @@ export const NOT_INDEXED_MESSAGE =
   "This project's remembering schema has not been indexed yet. Run memory_setup to initialise the schema and ingest the repository.";
 
 /**
- * Native TypeScript baseline engine (Stage 2 vertical slice).
- * Owns its pg Pool; call close() when done.
+ * Native TypeScript baseline engine.
+ * Storage backend is replaceable (postgres | http | json); call close() when done.
  */
 export class RememberingEngine {
   private pool: Pool | null = null;
+  private resolved: ResolvedStores | null = null;
   private embedder: EmbeddingProvider;
   readonly chunking: ChunkingConfig;
 
@@ -123,54 +131,165 @@ export class RememberingEngine {
     return this;
   }
 
+  /** Active backend selection (machine + human readable). */
+  storageSelection(): Record<string, unknown> {
+    return (this.resolved?.selection ?? { activeBackend: "unresolved", configuredMode: this.storageMode() }) as Record<string, unknown>;
+  }
+
+  private storageMode(): string {
+    return this.options.storage?.mode ?? "postgres";
+  }
+
+  private async stores(): Promise<ResolvedStores> {
+    if (this.resolved) return this.resolved;
+    const storage = this.options.storage ?? {};
+    this.resolved = await resolveStores({
+      mode: storage.mode ?? "postgres",
+      primary: storage.primary,
+      dsn: this.options.dsn,
+      schema: this.options.schema,
+      projectDirectory: this.options.projectDirectory,
+      projectId: this.options.projectId,
+      httpUrl: storage.httpUrl ?? null,
+      httpTokenEnv: storage.httpTokenEnv,
+      httpTimeoutMs: storage.httpTimeoutMs ?? 15_000,
+      jsonPath: storage.jsonPath ?? ".remembering/store",
+    });
+    return this.resolved;
+  }
+
   private async poolConnected(): Promise<Pool> {
+    const resolved = await this.stores();
+    if (resolved.selection.activeBackend !== "postgres") {
+      throw new EngineError("DB_UNREACHABLE", `postgres pool requested but active backend is ${resolved.selection.activeBackend}.`);
+    }
+    // Postgres path owns its pool via the factory; recover it through baseline store.
+    const baseline = resolved.baseline as unknown as { pool?: Pool };
+    const maybePool = baseline.pool;
+    if (maybePool) {
+      this.pool = maybePool;
+      return maybePool;
+    }
     if (!this.pool) this.pool = await connectPool(this.options.dsn);
     return this.pool;
   }
 
   async close(): Promise<void> {
+    if (this.resolved) {
+      await this.resolved.close().catch(() => {});
+      this.resolved = null;
+    }
     if (this.pool) {
       await this.pool.end().catch(() => {});
       this.pool = null;
     }
   }
 
-  private store(pool: Pool): BaselineStore {
-    return new BaselineStore(pool, this.options.dsn, this.options.schema);
+  private store(_pool: Pool): BaselineStorePort {
+    if (this.resolved) return this.resolved.baseline;
+    throw new EngineError("DB_UNREACHABLE", "storage not resolved yet.");
   }
 
   async doctor(): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const baseline = await doctorBaseline(pool, {
-      dsn: this.options.dsn,
+    const resolved = await this.stores();
+    if (resolved.selection.activeBackend === "postgres") {
+      const pool = await this.poolConnected();
+      const baseline = await doctorBaseline(pool, {
+        dsn: this.options.dsn,
+        schema: this.options.schema,
+        projectDirectory: this.options.projectDirectory,
+        embedding: this.options.embedding,
+      });
+      return { ...baseline, native: true, storage: resolved.selection, capabilities: resolved.baseline.capabilities() };
+    }
+    // JSON / HTTP backends: product readiness means the selected store
+    // satisfies the contract, not postgres+pgvector presence.
+    const baseline = resolved.baseline;
+    const initialised = await baseline.isInitialised().catch(() => false);
+    const stats = initialised ? await baseline.stats().catch(() => null) : null;
+    const meta = initialised ? await baseline.readProjectMeta().catch(() => ({} as Record<string, string>)) : {};
+    const canonical = await canonicalProjectDir(this.options.projectDirectory);
+    let schemaIdentityOk = true;
+    const recorded = (meta as Record<string, string>)["project.path"];
+    if (recorded != null && recorded !== canonical) schemaIdentityOk = false;
+    let embeddingReachable = false;
+    let embeddingDetail = "";
+    try {
+      const probe = await this.embedder.embed(["dimension probe"]);
+      embeddingReachable = true;
+      embeddingDetail = `${probe.provider}:${probe.model}:${probe.dimension}`;
+    } catch (error) {
+      embeddingDetail = error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200);
+    }
+    const ok = initialised && schemaIdentityOk && embeddingReachable;
+    return {
+      ok,
+      native: true,
+      engine_version: (await import("./storage")).ENGINE_VERSION,
       schema: this.options.schema,
-      projectDirectory: this.options.projectDirectory,
-      embedding: this.options.embedding,
-    });
-    return { ...baseline, native: true };
+      project_directory: canonical,
+      indexed: initialised,
+      schema_initialized: initialised,
+      schema_identity_ok: schemaIdentityOk,
+      source_count: stats ? (stats["sources"] ?? null) : null,
+      chunk_count: stats ? (stats["chunks"] ?? null) : null,
+      chunks: stats ? (stats["chunks"] ?? null) : null,
+      embedding_provider_reachable: embeddingReachable,
+      embedding_detail: embeddingDetail,
+      storage: resolved.selection,
+      capabilities: baseline.capabilities(),
+      message: !initialised ? "JSON store not initialised; run memory_setup." : !schemaIdentityOk ? "SCHEMA_MISMATCH: store claimed by another project." : !embeddingReachable ? "embedding unavailable." : `Ready on ${resolved.selection.activeBackend} backend.`,
+    };
   }
 
   async setup(): Promise<{ ok: boolean; schema: string; embedding: { provider: string; model: string; dimension: number; version: string } }> {
-    const pool = await this.poolConnected();
-    const client = await pool.connect();
-    try {
-      await ensureExtension(client, "vector");
-      await ensureExtension(client, "pg_trgm");
-    } finally {
-      client.release();
+    const resolved = await this.stores();
+    if (resolved.selection.activeBackend === "postgres") {
+      const pool = await this.poolConnected();
+      const client = await pool.connect();
+      try {
+        await ensureExtension(client, "vector");
+        await ensureExtension(client, "pg_trgm");
+      } finally {
+        client.release();
+      }
+      const probe = await this.embedder.embed(["dimension probe"]);
+      const dimension = probe.dimension;
+      const store = resolved.baseline;
+      await store.initialise(dimension);
+      await this.ensureProjectMeta();
+      await store.ensureHnsw();
+      // Stage 3 subsystem stores (idempotent; no data migration).
+      await resolved.temporal.initialise();
+      await resolved.standing.initialise();
+      await resolved.trace.initialise();
+      await resolved.loop.initialise();
+      await resolved.write.initialise();
+      const { error: trustError } = await loadTrustPolicy(this.options.projectDirectory);
+      if (trustError) throw new EngineError("TRUST_POLICY_INVALID", trustError);
+      const { valid: writeValid, error: writeError } = await loadWritePolicy(this.options.projectDirectory);
+      if (!writeValid && writeError) throw new EngineError("WRITE_POLICY_INVALID", writeError);
+      return {
+        ok: true,
+        schema: this.options.schema,
+        embedding: {
+          provider: probe.provider,
+          model: probe.model,
+          dimension: probe.dimension,
+          version: `${probe.provider}:${probe.model}:${probe.dimension}`,
+        },
+      };
     }
+    // JSON / HTTP setup: no extensions, no arbitrary SQL over HTTP.
     const probe = await this.embedder.embed(["dimension probe"]);
-    const dimension = probe.dimension;
-    const store = this.store(pool);
-    await store.initialise(dimension);
-    await this.ensureProjectMeta(pool);
-    await store.ensureHnsw();
-    // Stage 3 subsystem stores (idempotent; no data migration).
-    await new PostgresTemporalStore(pool, this.options.schema).initialise();
-    await new PostgresStandingStore(pool, this.options.schema).initialise();
-    await new PostgresTraceStore(pool, this.options.schema).initialise();
-    await new PostgresLoopStore(pool, this.options.schema).initialise();
-    await new PostgresWriteStore(pool, this.options.schema).initialise();
+    await resolved.baseline.initialise(probe.dimension);
+    await this.ensureProjectMeta();
+    await resolved.baseline.ensureHnsw().catch(() => false);
+    await resolved.temporal.initialise();
+    await resolved.standing.initialise();
+    await resolved.trace.initialise();
+    await resolved.loop.initialise();
+    await resolved.write.initialise();
     const { error: trustError } = await loadTrustPolicy(this.options.projectDirectory);
     if (trustError) throw new EngineError("TRUST_POLICY_INVALID", trustError);
     const { valid: writeValid, error: writeError } = await loadWritePolicy(this.options.projectDirectory);
@@ -178,51 +297,52 @@ export class RememberingEngine {
     return {
       ok: true,
       schema: this.options.schema,
-      embedding: {
-        provider: probe.provider,
-        model: probe.model,
-        dimension: probe.dimension,
-        version: `${probe.provider}:${probe.model}:${probe.dimension}`,
-      },
+      embedding: { provider: probe.provider, model: probe.model, dimension: probe.dimension, version: `${probe.provider}:${probe.model}:${probe.dimension}` },
     };
   }
 
-  private async ensureProjectMeta(pool: Pool): Promise<void> {
+  private async ensureProjectMeta(): Promise<void> {
+    const resolved = await this.stores();
     const canonical = await canonicalProjectDir(this.options.projectDirectory);
-    const client = await pool.connect();
-    try {
-      const meta = await readProjectMeta(client, this.options.schema);
-      const recorded = meta["project.path"];
-      if (recorded != null && recorded !== canonical) {
-        throw new EngineError(
-          "SCHEMA_MISMATCH",
-          `schema ${JSON.stringify(this.options.schema)} is already claimed by project ${JSON.stringify(recorded)}, but this project resolves to ${JSON.stringify(canonical)}. Refusing to mix projects: fix the schema configuration instead of sharing an index.`,
-        );
-      }
-      const stamp = new Date().toISOString();
-      const s = ident(this.options.schema);
-      for (const [key, value] of [
-        ["project.path", canonical],
-        ["project.schema", this.options.schema],
-        ["project.recorded_at", stamp],
-      ] as Array<[string, string]>) {
-        await client.query(
-          `INSERT INTO ${s}.meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING`,
-          [key, value],
-        );
-      }
-    } finally {
-      client.release();
+    const meta = await resolved.baseline.readProjectMeta().catch(() => ({} as Record<string, string>));
+    const recorded = (meta as Record<string, string>)["project.path"];
+    if (recorded != null && recorded !== canonical) {
+      throw new EngineError(
+        "SCHEMA_MISMATCH",
+        `schema ${JSON.stringify(this.options.schema)} is already claimed by project ${JSON.stringify(recorded)}, but this project resolves to ${JSON.stringify(canonical)}. Refusing to mix projects: fix the schema configuration instead of sharing an index.`,
+      );
     }
+    const stamp = new Date().toISOString();
+    if (resolved.selection.activeBackend === "postgres") {
+      const pool = await this.poolConnected();
+      const client = await pool.connect();
+      try {
+        const s = ident(this.options.schema);
+        for (const [key, value] of [
+          ["project.path", canonical],
+          ["project.schema", this.options.schema],
+          ["project.recorded_at", stamp],
+        ] as Array<[string, string]>) {
+          await client.query(
+            `INSERT INTO ${s}.meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING`,
+            [key, value],
+          );
+        }
+      } finally {
+        client.release();
+      }
+      return;
+    }
+    await resolved.baseline.writeProjectMeta({ "project.path": canonical, "project.schema": this.options.schema, "project.recorded_at": stamp });
   }
 
   async refresh(): Promise<RefreshReport> {
-    const pool = await this.poolConnected();
-    const store = this.store(pool);
+    const resolved = await this.stores();
+    const store = resolved.baseline;
     // Baseline refresh requires an initialised store.
     const probe = await this.embedder.embed(["dimension probe"]);
     await store.initialise(probe.dimension);
-    await this.ensureProjectMeta(pool);
+    await this.ensureProjectMeta();
 
     const report: RefreshReport = {
       ok: true,
@@ -333,11 +453,10 @@ export class RememberingEngine {
 
   private async temporalImportSafe(): Promise<{ imported: number; duplicates: number; failed: string[]; events: number; subjects: string[] }> {
     try {
-      const pool = await this.poolConnected();
-      const pgStore = new PostgresTemporalStore(pool, this.options.schema);
-      await pgStore.initialise();
+      const resolved = await this.stores();
+      await resolved.temporal.initialise();
       const { TemporalService: Service } = await import("./temporal/service");
-      const summary = await new Service(pgStore).importFile(this.options.projectDirectory);
+      const summary = await new Service(resolved.temporal).importFile(this.options.projectDirectory);
       return summary;
     } catch {
       return { imported: 0, duplicates: 0, failed: [], events: 0, subjects: [] };
@@ -352,11 +471,11 @@ export class RememberingEngine {
   }
 
   async verify(): Promise<void> {
-    const pool = await this.poolConnected();
-    await this.verifyWith(this.store(pool));
+    const resolved = await this.stores();
+    await this.verifyWith(resolved.baseline);
   }
 
-  private async verifyWith(store: BaselineStore): Promise<void> {
+  private async verifyWith(store: BaselineStorePort): Promise<void> {
     if (await store.orphanChunks()) {
       throw new EngineError("VERIFY_FAILED", "orphan chunks remain after refresh");
     }
@@ -375,15 +494,10 @@ export class RememberingEngine {
       return { ok: true, indexed: true, schema: this.options.schema, items: [], trace: null, message: "empty query: no retrieval attempted." };
     }
     const boundedLimit = Math.max(1, Math.min(limit, 20));
-    const pool = await this.poolConnected();
-    const client = await pool.connect();
-    try {
-      const reg = await client.query("SELECT to_regclass($1)", [`${this.options.schema}.chunks`]);
-      if (reg.rows[0]?.to_regclass == null) {
-        return { ok: true, indexed: false, schema: this.options.schema, items: [], trace: null, message: NOT_INDEXED_MESSAGE };
-      }
-    } finally {
-      client.release();
+    const resolved = await this.stores();
+    const initialised = await resolved.baseline.isInitialised().catch(() => false);
+    if (!initialised) {
+      return { ok: true, indexed: false, schema: this.options.schema, items: [], trace: null, message: NOT_INDEXED_MESSAGE };
     }
     const probe = await this.embedder.embed(["dimension probe"]);
     const embIdentity = {
@@ -392,7 +506,7 @@ export class RememberingEngine {
       dimension: probe.dimension,
       version: `${probe.provider}:${probe.model}:${probe.dimension}`,
     };
-    const retriever = new Retriever(this.store(pool), this.embedder, this.options.retrieval);
+    const retriever = new Retriever(resolved.baseline, this.embedder, this.options.retrieval);
     const trace: RetrievalTrace = await retriever.retrieve(trimmed);
     const lexicalRanks = new Map(trace.lexical.map((c) => [c.chunkId, c.rank]));
     const denseRanks = new Map(trace.dense.map((c) => [c.chunkId, c.rank]));
@@ -444,10 +558,9 @@ export class RememberingEngine {
   // -- Stage 3A: temporal ---------------------------------------------
 
   async temporalImport(): Promise<{ ok: boolean; schema: string; message: string; imported: number; duplicates: number; failed: string[]; events: number; subjects: string[] }> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresTemporalStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const service = new TemporalService(pgStore);
+    const resolved = await this.stores();
+    await resolved.temporal.initialise();
+    const service = new TemporalService(resolved.temporal);
     const summary = await service.importFile(this.options.projectDirectory);
     return {
       ok: summary.failed.length === 0,
@@ -467,25 +580,24 @@ export class RememberingEngine {
       valid_at: options.temporal?.valid_at,
       known_at: options.temporal?.known_at,
     });
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresTemporalStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const events = await pgStore.list();
-    const resolved = resolveAtStandpoint(events, subject, standpoint);
-    const versions = await pgStore.versions();
+    const resolved = await this.stores();
+    await resolved.temporal.initialise();
+    const events = await resolved.temporal.list();
+    const resolvedState = resolveAtStandpoint(events, subject, standpoint);
+    const versions = await resolved.temporal.versions();
     return {
       ok: true,
       schema: this.options.schema,
       subject,
-      value: resolved.value,
-      status: resolved.status,
-      detail: resolved.reason,
-      provenance: resolved.provenance,
+      value: resolvedState.value,
+      status: resolvedState.status,
+      detail: resolvedState.reason,
+      provenance: resolvedState.provenance,
       standpoint: { mode: standpoint.mode, valid_at: standpoint.validAt ?? null, known_at: standpoint.knownAt ?? null },
-      trajectory: resolved.trajectory,
+      trajectory: resolvedState.trajectory,
       trajectory_truncated: false,
-      incomplete_history: resolved.incompleteHistory,
-      reason: resolved.reason,
+      incomplete_history: resolvedState.incompleteHistory,
+      reason: resolvedState.reason,
       route: { route: route.route, route_source: route.routeSource, route_reason: route.routeReason, route_ambiguous: route.routeAmbiguous },
       store_version: versions.storeVersion,
       event_schema_version: versions.eventSchemaVersion,
@@ -504,12 +616,11 @@ export class RememberingEngine {
   // -- Stage 3C: trust --------------------------------------------------
 
   async trustDecisions(sourceIds: string[], requiredLevel: TrustLevel = "FULL"): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresStandingStore(pool, this.options.schema);
-    await pgStore.initialise();
+    const resolved = await this.stores();
+    await resolved.standing.initialise();
     const { policy, valid, error } = await loadTrustPolicy(this.options.projectDirectory);
     if (!valid) throw new EngineError("TRUST_POLICY_INVALID", error ?? "invalid trust policy.");
-    const standing = resolveStanding(await pgStore.list());
+    const standing = resolveStanding(await resolved.standing.list());
     const { decideTrust } = await import("./trust/standing");
     return {
       decisions: sourceIds.map((id) => decideTrust(policy, standing, id, requiredLevel)),
@@ -521,73 +632,70 @@ export class RememberingEngine {
   // -- Stage 3E: trace --------------------------------------------------
 
   async traceGet(traceId: string): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const service = new TraceService(new PostgresTraceStore(pool, this.options.schema));
+    const resolved = await this.stores();
+    const service = new TraceService(resolved.trace);
     return (await service.get(traceId)) as unknown as Record<string, unknown>;
   }
 
   async traceFind(filters: { source_id?: string; chunk_id?: string; route?: string; work_type?: string; terminal_stage?: string; before?: string; after?: string; limit?: number } = {}): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const service = new TraceService(new PostgresTraceStore(pool, this.options.schema));
+    const resolved = await this.stores();
+    const service = new TraceService(resolved.trace);
     return { traces: await service.find({ sourceId: filters.source_id, chunkId: filters.chunk_id, route: filters.route, workType: filters.work_type, terminalStage: filters.terminal_stage, before: filters.before, after: filters.after, limit: filters.limit }) };
   }
 
   async traceExplain(traceId: string, candidateId: string): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const service = new TraceService(new PostgresTraceStore(pool, this.options.schema));
+    const resolved = await this.stores();
+    const service = new TraceService(resolved.trace);
     return await service.explain(traceId, candidateId);
   }
 
   async traceVerify(traceId: string): Promise<{ valid: boolean; reason: string }> {
-    const pool = await this.poolConnected();
-    const service = new TraceService(new PostgresTraceStore(pool, this.options.schema));
+    const resolved = await this.stores();
+    const service = new TraceService(resolved.trace);
     return service.verify(traceId);
   }
 
   async traceReplay(traceId: string, replayKind: "trust" | "selection", persist = false): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const service = new TraceService(new PostgresTraceStore(pool, this.options.schema));
+    const resolved = await this.stores();
+    const service = new TraceService(resolved.trace);
     const { replayed, persisted } = await service.replay(traceId, replayKind, (c) => c, persist, "current");
     return { ...(replayed as unknown as Record<string, unknown>), persisted };
   }
 
   async traceDiff(traceId: string, diffWith: string): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const service = new TraceService(new PostgresTraceStore(pool, this.options.schema));
+    const resolved = await this.stores();
+    const service = new TraceService(resolved.trace);
     return service.diff(traceId, diffWith);
   }
 
   // -- Stage 3F: loops --------------------------------------------------
 
   async loopCreate(transition: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresLoopStore(pool, this.options.schema);
-    await pgStore.initialise();
+    const resolved = await this.stores();
+    await resolved.loop.initialise();
     const event = validateLoopEvent({ kind: "create", at: new Date().toISOString(), ...(transition as object) });
     if (!event.eventId || !event.loopId) throw new EngineError("LOOP_INVALID", "loop create requires event_id and loop_id.");
-    const existing = (await pgStore.list()).filter((e) => e.loopId === event.loopId);
+    const existing = (await resolved.loop.list()).filter((e) => e.loopId === event.loopId);
     if (existing.length > 0) {
-      const views = reduceLoopEvents(await pgStore.list());
+      const views = reduceLoopEvents(await resolved.loop.list());
       return { duplicate: true, ...(views.get(event.loopId) as unknown as Record<string, unknown>) };
     }
-    await pgStore.append(event);
-    const views = reduceLoopEvents(await pgStore.list());
+    await resolved.loop.append(event);
+    const views = reduceLoopEvents(await resolved.loop.list());
     return { duplicate: false, ...(views.get(event.loopId) as unknown as Record<string, unknown>) };
   }
 
   async loopAppend(event: Record<string, unknown>): Promise<{ duplicate: boolean }> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresLoopStore(pool, this.options.schema);
-    await pgStore.initialise();
-    return pgStore.append(validateLoopEvent(event));
+    const resolved = await this.stores();
+    await resolved.loop.initialise();
+    return resolved.loop.append(validateLoopEvent(event));
   }
 
   async openLoops(request: { action?: string; loop_id?: string; state?: LoopState; subject?: string; transition_kind?: string; limit?: number } = {}): Promise<Record<string, unknown>> {
     const action = request.action ?? "list";
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresLoopStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const views = reduceLoopEvents(await pgStore.list());
+    const resolved = await this.stores();
+    await resolved.loop.initialise();
+    const views = reduceLoopEvents(await resolved.loop.list());
     const all = [...views.values()].sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
     if (action === "get" || action === "history") {
       if (!request.loop_id?.trim()) throw new EngineError("LOOP_INVALID", `loops action '${action}' requires loop_id.`);
@@ -611,9 +719,10 @@ export class RememberingEngine {
     return policy;
   }
 
-  private async indexExplicitRecord(pool: Pool, record: { recordId: string; content: string; role: string }): Promise<{ chunks: number; embedded: number }> {
+  private async indexExplicitRecord(record: { recordId: string; content: string; role: string }): Promise<{ chunks: number; embedded: number }> {
+    const resolved = await this.stores();
     const probe = await this.embedder.embed([record.content]);
-    const store = this.store(pool);
+    const store = resolved.baseline;
     await store.initialise(probe.dimension);
     const sourceId = `memory://${record.recordId}`;
     await store.upsertSource(sourceId, "memory-record", sha1(record.content), null);
@@ -635,59 +744,92 @@ export class RememberingEngine {
   }
 
   async remember(input: WriteInput): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresWriteStore(pool, this.options.schema);
-    await pgStore.initialise();
+    const resolved = await this.stores();
+    await resolved.write.initialise();
     const policy = await this.writePolicy();
-    const service = new WriteService(pgStore, policy, () => new Date().toISOString(), async (record) => {
-      await this.indexExplicitRecord(pool, record);
-    });
-    const out = await service.execute(input);
+    // Fail fast on embedding outage before mutating history: embedding or
+    // persistence failure must leave no partial write.
+    if (input.content?.trim()) {
+      try {
+        await this.embedder.embed([input.content.trim()]);
+      } catch (error) {
+        throw new EngineError("WRITE_INDEX_FAILED", `embedding failed before write: ${error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)}`);
+      }
+    }
+    const run = async () => {
+      const service = new WriteService(resolved.write, policy, () => new Date().toISOString(), async (record) => {
+        await this.indexExplicitRecord(record);
+      });
+      return service.execute(input);
+    };
+    let out: Awaited<ReturnType<typeof run>>;
+    try {
+      const transactional = resolved.write.transaction;
+      out = transactional ? await (resolved.write.transaction as (fn: () => Promise<typeof out>) => Promise<typeof out>).call(resolved.write, run) : await run();
+    } catch (error) {
+      if (error instanceof EngineError) throw error;
+      throw new EngineError("WRITE_STORE_FAILED", `explicit write failed: ${error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)}`);
+    }
     if (!out.ok) return { ...out, schema: this.options.schema };
     const indexed = out.record ? { indexed: true, chunks: 1, embedded: 1 } : undefined;
     return { ...out, record_id: out.recordId, target_record_id: out.targetRecordId, action_id: out.actionId, index: indexed, schema: this.options.schema };
   }
 
   async recordShow(recordId: string): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresWriteStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const record = await pgStore.getRecord(recordId);
+    const resolved = await this.stores();
+    await resolved.write.initialise();
+    const record = await resolved.write.getRecord(recordId);
     if (!record) throw new EngineError("MEMORY_TARGET_NOT_FOUND", `no memory record ${JSON.stringify(recordId)}.`);
     return { ...(record as unknown as Record<string, unknown>) };
   }
 
   async writeHistory(recordId: string): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresWriteStore(pool, this.options.schema);
-    await pgStore.initialise();
-    return { record_id: recordId, history: await pgStore.history(recordId) };
+    const resolved = await this.stores();
+    await resolved.write.initialise();
+    return { record_id: recordId, history: await resolved.write.history(recordId) };
   }
 
   async writeRebuild(): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresWriteStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const mem = new MemoryWriteStore();
-    void mem;
+    const resolved = await this.stores();
+    await resolved.write.initialise();
     let reindexed = 0;
-    // Re-index every active record through the native baseline store.
-    const client = await pool.connect();
-    try {
-      const s = ident(this.options.schema);
-      const res = await client.query(`SELECT record_id, content, role FROM ${s}.memory_records WHERE state = 'active'`);
-      for (const row of res.rows) {
-        await this.indexExplicitRecord(pool, {
-          recordId: row.record_id as string,
-          content: row.content as string,
-          role: row.role as string,
-        });
+    // Re-index every active record through the selected baseline store.
+    // Postgres path lists via the write store (no direct SQL here); JSON and
+    // HTTP backends share the same port. Full scan is v0.1 scale-acceptable.
+    const { reduceTemporalLog: _unused } = await import("./temporal/reducer").catch(() => ({ reduceTemporalLog: null }));
+    void _unused;
+    // Paginate logically: list via counts + history is insufficient, so scan
+    // through trace-independent means: reuse write store list when available.
+    const writeStoreAny = resolved.write as unknown as { listRecords?: () => Promise<Array<{ recordId: string; content: string; role: string; state: string }>> };
+    if (typeof writeStoreAny.listRecords === "function") {
+      for (const rec of await writeStoreAny.listRecords()) {
+        if ((rec as { state: string }).state !== "active") continue;
+        await this.indexExplicitRecord(rec);
         reindexed += 1;
       }
-    } finally {
-      client.release();
+      return { ok: true, schema: this.options.schema, reindexed };
     }
-    return { ok: true, schema: this.options.schema, reindexed };
+    // Fallback: postgres direct scan preserved for the richest backend.
+    if (resolved.selection.activeBackend === "postgres") {
+      const pool = await this.poolConnected();
+      const client = await pool.connect();
+      try {
+        const s = ident(this.options.schema);
+        const res = await client.query(`SELECT record_id, content, role FROM ${s}.memory_records WHERE state = 'active'`);
+        for (const row of res.rows) {
+          await this.indexExplicitRecord({
+            recordId: row.record_id as string,
+            content: row.content as string,
+            role: row.role as string,
+          });
+          reindexed += 1;
+        }
+      } finally {
+        client.release();
+      }
+      return { ok: true, schema: this.options.schema, reindexed };
+    }
+    return { ok: true, schema: this.options.schema, reindexed, message: "writeRebuild scan requires listRecords on this backend; nothing reindexed." };
   }
 
   // -- Native context pipeline ---------------------------------------------
@@ -713,12 +855,11 @@ export class RememberingEngine {
     const { loadProjectFrame } = await import("./frame/service");
     const { frame, error: frameError } = await loadProjectFrame(this.options.projectDirectory);
     const frameResult = establishFrame(frame, frameError, work ?? {});
-    const pool = await this.poolConnected();
+    const resolved = await this.stores();
     const { policy: trustPolicy, valid: trustValid, error: trustError } = await loadTrustPolicy(this.options.projectDirectory);
     if (!trustValid) throw new EngineError("TRUST_POLICY_INVALID", trustError ?? "invalid trust policy.");
-    const standingStore = new PostgresStandingStore(pool, this.options.schema);
-    await standingStore.initialise();
-    const standing = resolveStanding(await standingStore.list());
+    await resolved.standing.initialise();
+    const standing = resolveStanding(await resolved.standing.list());
     const requiredLevel = trust?.level ?? "FULL";
     const candidates = (search.items ?? []).map((item) => ({
       candidateId: item.chunk_id,
@@ -741,9 +882,11 @@ export class RememberingEngine {
       selectionMode: selection?.mode ?? "decisive",
       budget: { maxChars, maxResults },
     });
-    const traceService = new TraceService(new PostgresTraceStore(pool, this.options.schema));
-    await new PostgresTraceStore(pool, this.options.schema).initialise();
-    const traceRecord = await traceService.create({
+    const traceService = new TraceService(resolved.trace);
+    await resolved.trace.initialise();
+    let traceRecord: { traceId: string };
+    try {
+      traceRecord = await traceService.create({
       query: trimmed,
       route: route.route,
       workType: frameResult.establishment?.workType ?? null,
@@ -767,7 +910,32 @@ export class RememberingEngine {
         selection: selection?.mode ?? "decisive",
       },
       budget: { maxChars, maxResults },
-    });
+      });
+    } catch (error) {
+      // Influential memory is not injected if its trace cannot persist.
+      if (route.route === "influence") {
+        throw new EngineError("TRACE_PERSIST_FAILED", `trace persistence failed: ${error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)}`);
+      }
+      const itemsFallback = staged.selection.selected.map((s, i) => {
+        const full = candidates.find((c) => c.candidateId === s.candidateId);
+        return {
+          chunk_id: s.candidateId, source_id: s.sourceId, section: full?.section ?? null,
+          rank: i + 1, score: s.score, text: s.text,
+          lexical_rank: full?.lexicalRank ?? null, dense_rank: full?.denseRank ?? null, stage: "selected",
+        };
+      });
+      return {
+        ok: true, indexed: search.indexed, schema: this.options.schema, items: itemsFallback,
+        trace: search.trace, trace_id: "trace-persist-failed", content: staged.content, chars: staged.chars,
+        route: { route: route.route, route_source: route.routeSource, route_reason: route.routeReason, route_ambiguous: route.routeAmbiguous },
+        temporal: { mode: standpoint.mode, valid_at: standpoint.validAt ?? null, known_at: standpoint.knownAt ?? null },
+        frame: { applied: frameResult.applied, reason: frameResult.reason },
+        trust: { mode: route.route, level: trust?.level ?? "FULL" },
+        selection: { policy_version: SELECT_POLICY_VERSION },
+        trace_persisted: false, admission_note: `${staged.admissionNote} trace persistence failed; recall degrades visibly.`,
+        storage: resolved.selection,
+      };
+    }
     const items = staged.selection.selected.map((s, i) => {
       const full = candidates.find((c) => c.candidateId === s.candidateId);
       return {
@@ -840,29 +1008,20 @@ export class RememberingEngine {
   // -- Native health across all subsystems -----------------------------------
 
   async nativeDoctor(): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const baseline = await doctorBaseline(pool, {
-      dsn: this.options.dsn,
-      schema: this.options.schema,
-      projectDirectory: this.options.projectDirectory,
-      embedding: this.options.embedding,
-    });
-    const temporalStore = new PostgresTemporalStore(pool, this.options.schema);
-    await temporalStore.initialise();
-    const temporalService = new TemporalService(temporalStore);
+    const resolved = await this.stores();
+    const baseline = await this.doctor();
+    const temporalService = new TemporalService(resolved.temporal);
+    await resolved.temporal.initialise().catch(() => {});
     const temporalHealth = await temporalService.health();
     const frame = await frameHealth(this.options.projectDirectory);
     const { policy: trustPolicy, valid: trustValid, error: trustError } = await loadTrustPolicy(this.options.projectDirectory);
-    const standingStore = new PostgresStandingStore(pool, this.options.schema);
-    await standingStore.initialise();
-    const standingEvents = await standingStore.list();
+    await resolved.standing.initialise().catch(() => {});
+    const standingEvents = await resolved.standing.list().catch(() => []);
     const standing = resolveStanding(standingEvents);
-    const traceStore = new PostgresTraceStore(pool, this.options.schema);
-    await traceStore.initialise();
-    const traceCounts = await traceStore.count();
-    const loopStore = new PostgresLoopStore(pool, this.options.schema);
-    await loopStore.initialise();
-    const loopEvents = await loopStore.list();
+    await resolved.trace.initialise().catch(() => {});
+    const traceCounts = await resolved.trace.count().catch(() => ({ traces: 0, oldest: null, newest: null }));
+    await resolved.loop.initialise().catch(() => {});
+    const loopEvents = await resolved.loop.list().catch(() => []);
     let loopViews: Array<{ state: string; evidenceRefs: string[] }> = [];
     let loopError: string | undefined;
     try {
@@ -870,9 +1029,8 @@ export class RememberingEngine {
     } catch (error) {
       loopError = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160);
     }
-    const writeStore = new PostgresWriteStore(pool, this.options.schema);
-    await writeStore.initialise();
-    const writeCounts = await writeStore.counts();
+    await resolved.write.initialise().catch(() => {});
+    const writeCounts = await resolved.write.counts().catch(() => ({ records: 0, actions: 0, byAction: {} as Record<string, number>, lastActionAt: null }));
     const { policy: writePolicy, valid: writeValid, error: writePolicyError } = await loadWritePolicy(this.options.projectDirectory);
     const countBy = (state: string) => loopViews.filter((v) => v.state === state).length;
     const result: Record<string, unknown> = {
@@ -1064,11 +1222,10 @@ export class RememberingEngine {
   }
 
   async trustImport(): Promise<{ ok: boolean; schema: string; message: string; imported: number; duplicates: number; failed: string[]; events: number; subjects: string[] }> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresStandingStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const outcome = await this.importJsonLines(joinTrustEvents(), async (raw) => pgStore.append(validateStandingEvent(raw)));
-    const events = await pgStore.count();
+    const resolved = await this.stores();
+    await resolved.standing.initialise();
+    const outcome = await this.importJsonLines(joinTrustEvents(), async (raw) => resolved.standing.append(validateStandingEvent(raw)));
+    const events = await resolved.standing.count();
     return {
       ok: outcome.failed.length === 0,
       schema: this.options.schema,
@@ -1080,28 +1237,26 @@ export class RememberingEngine {
   }
 
   async loopImport(): Promise<{ ok: boolean; schema: string; message: string; imported: number; duplicates: number; failed: string[]; events: number; subjects: string[] }> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresLoopStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const outcome = await this.importJsonLines(joinLoopEvents(), async (raw) => pgStore.append(validateLoopEvent(raw)));
-    const views = reduceLoopEvents(await pgStore.list());
+    const resolved = await this.stores();
+    await resolved.loop.initialise();
+    const outcome = await this.importJsonLines(joinLoopEvents(), async (raw) => resolved.loop.append(validateLoopEvent(raw)));
+    const views = reduceLoopEvents(await resolved.loop.list());
     return {
       ok: outcome.failed.length === 0,
       schema: this.options.schema,
       message: outcome.failed.length ? `loop import failures: ${outcome.failed.join("; ")}` : `loop events +${outcome.imported} (${views.size} loops).`,
       ...outcome,
-      events: await pgStore.count(),
+      events: await resolved.loop.count(),
       subjects: [...views.values()].map((v) => v.subject),
     };
   }
 
   async memoryImport(): Promise<{ imported: number; duplicates: number; failed: string[]; denied: string[]; events: number }> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresWriteStore(pool, this.options.schema);
-    await pgStore.initialise();
+    const resolved = await this.stores();
+    await resolved.write.initialise();
     const policy = await this.writePolicy();
-    const service = new WriteService(pgStore, policy, () => new Date().toISOString(), async (record) => {
-      await this.indexExplicitRecord(pool, record);
+    const service = new WriteService(resolved.write, policy, () => new Date().toISOString(), async (record) => {
+      await this.indexExplicitRecord(record);
     });
     let imported = 0;
     let duplicates = 0;
@@ -1132,27 +1287,25 @@ export class RememberingEngine {
     imported = outcome.imported;
     duplicates = outcome.duplicates;
     failed.push(...outcome.failed);
-    const counts = await pgStore.counts();
+    const counts = await resolved.write.counts();
     return { imported, duplicates, failed, denied, events: counts.actions };
   }
 
   async loopRebuild(): Promise<Record<string, unknown>> {
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresLoopStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const events = await pgStore.list();
+    const resolved = await this.stores();
+    await resolved.loop.initialise();
+    const events = await resolved.loop.list();
     const views = reduceLoopEvents(events);
     return { ok: true, schema: this.options.schema, events: events.length, loops: views.size };
   }
 
   async actionShow(actionId: string): Promise<Record<string, unknown>> {
     if (!actionId.trim()) throw new EngineError("CONFIG_INVALID", "action_show requires action_id.");
-    const pool = await this.poolConnected();
-    const pgStore = new PostgresWriteStore(pool, this.options.schema);
-    await pgStore.initialise();
-    const action = await pgStore.getAction(actionId.trim());
+    const resolved = await this.stores();
+    await resolved.write.initialise();
+    const action = await resolved.write.getAction(actionId.trim());
     if (!action) return { ok: false, schema: this.options.schema, message: "WRITE_ACTION_NOT_FOUND" };
-    const record = action.recordId ? await pgStore.getRecord(action.recordId) : null;
+    const record = action.recordId ? await resolved.write.getRecord(action.recordId) : null;
     return { ok: true, schema: this.options.schema, action, record };
   }
 

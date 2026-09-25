@@ -1,9 +1,24 @@
 {
   "dsn": "postgresql://postgres:<password>@localhost:5432/memory_baseline",
+  "storage": {
+    "mode": "auto",
+    "postgres": {
+      "dsn": "postgresql://postgres:<password>@localhost:5432/memory_baseline"
+    },
+    "http": {
+      "url": null,
+      "token_env": "REMEMBERING_HTTP_TOKEN",
+      "timeout_ms": 15000
+    },
+    "json": {
+      "path": ".remembering/store"
+    }
+  },
   "embedding": {
     "provider": "ollama",
     "model": "bge-m3",
-    "host": "http://localhost:11434"
+    "host": "http://localhost:11434",
+    "auth_token_env": "REMEMBERING_EMBEDDING_AUTH_TOKEN"
   },
   "retrieval": {
     "mode": "hybrid",

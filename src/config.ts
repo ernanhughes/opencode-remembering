@@ -7,6 +7,19 @@ export type EmbeddingConfig = {
   provider: "ollama" | "sentence-transformers" | "hashing";
   model: string;
   host: string;
+  headersEnv?: string;
+  authTokenEnv?: string;
+};
+
+export type StorageMode = "postgres" | "http" | "json" | "auto";
+
+export type StorageConfig = {
+  mode: StorageMode;
+  /** Primary backend tried first in auto mode. Defaults to http when url set, else postgres. */
+  primary?: "postgres" | "http";
+  postgres: { dsn: string };
+  http: { url: string | null; tokenEnv?: string; timeoutMs: number };
+  json: { path: string };
 };
 
 export type RetrievalConfig = {
@@ -21,6 +34,8 @@ export type RetrievalConfig = {
 export type RememberingConfig = {
   dsn: string;
   schema: string;
+  projectId?: string;
+  storage?: StorageConfig;
   embedding: EmbeddingConfig;
   retrieval: RetrievalConfig;
   context: {
@@ -33,6 +48,15 @@ export type RememberingConfig = {
 type RawConfig = {
   dsn?: unknown;
   schema?: unknown;
+  project_id?: unknown;
+  projectId?: unknown;
+  storage?: {
+    mode?: unknown;
+    primary?: unknown;
+    postgres?: { dsn?: unknown };
+    http?: { url?: unknown; token_env?: unknown; timeout_ms?: unknown };
+    json?: { path?: unknown };
+  };
   // Removed in Stage 3.5 (bundled engine). Still detected so stale
   // configs fail closed; see rejectLegacyRoot.
   project_memory_root?: unknown;
@@ -40,6 +64,8 @@ type RawConfig = {
     provider?: unknown;
     model?: unknown;
     host?: unknown;
+    headers_env?: unknown;
+    auth_token_env?: unknown;
   };
   retrieval?: {
     mode?: unknown;
@@ -185,7 +211,11 @@ function parseEmbedding(raw: RawConfig): EmbeddingConfig {
     nonEmptyString(process.env.REMEMBERING_EMBEDDING_HOST) ??
     nonEmptyString(raw.embedding?.host) ??
     "http://localhost:11434";
-  return { provider, model, host };
+  const headersEnv = nonEmptyString(raw.embedding?.headers_env);
+  const authTokenEnv =
+    nonEmptyString(process.env.REMEMBERING_EMBEDDING_AUTH_TOKEN_ENV) ??
+    nonEmptyString(raw.embedding?.auth_token_env);
+  return { provider, model, host, ...(headersEnv ? { headersEnv } : {}), ...(authTokenEnv ? { authTokenEnv } : {}) };
 }
 
 function parseRetrieval(raw: RawConfig): RetrievalConfig {
@@ -227,6 +257,54 @@ function parseRetrieval(raw: RawConfig): RetrievalConfig {
   };
 }
 
+function parseStorage(raw: RawConfig, dsn: string): StorageConfig {
+  const rawMode =
+    nonEmptyString(process.env.REMEMBERING_STORAGE_MODE) ??
+    nonEmptyString(raw.storage?.mode);
+  // Backward compatibility: a config with only top-level dsn keeps meaning
+  // direct PostgreSQL. New storage section opts into http/json/auto.
+  let mode: StorageMode = "postgres";
+  if (rawMode !== undefined) {
+    if (rawMode !== "postgres" && rawMode !== "http" && rawMode !== "json" && rawMode !== "auto") {
+      throw new Error(
+        `Invalid OpenCode Remembering config: storage.mode must be "postgres", "http", "json" or "auto", got ${JSON.stringify(rawMode)}.`,
+      );
+    }
+    mode = rawMode;
+  } else if (raw.storage !== undefined) {
+    mode = "auto";
+  }
+  const postgresDsn =
+    nonEmptyString(raw.storage?.postgres?.dsn) ?? dsn;
+  const httpUrl =
+    nonEmptyString(process.env.REMEMBERING_HTTP_URL) ??
+    nonEmptyString(raw.storage?.http?.url) ??
+    null;
+  if (mode === "http" && !httpUrl) {
+    throw new Error(
+      "Invalid OpenCode Remembering config: storage.mode is \"http\" but storage.http.url is not configured.",
+    );
+  }
+  const tokenEnv = nonEmptyString(raw.storage?.http?.token_env);
+  const timeoutRaw = raw.storage?.http?.timeout_ms;
+  const timeoutMs = timeoutRaw === undefined ? 15_000
+    : typeof timeoutRaw === "number" && Number.isInteger(timeoutRaw) && timeoutRaw >= 1000 && timeoutRaw <= 120_000 ? timeoutRaw
+    : (() => { throw new Error("Invalid OpenCode Remembering config: storage.http.timeout_ms must be an integer 1000-120000."); })();
+  const jsonPath =
+    nonEmptyString(process.env.REMEMBERING_JSON_PATH) ??
+    nonEmptyString(raw.storage?.json?.path) ??
+    ".remembering/store";
+  const primaryRaw = nonEmptyString(raw.storage?.primary);
+  let primary: "postgres" | "http" | undefined;
+  if (primaryRaw !== undefined) {
+    if (primaryRaw !== "postgres" && primaryRaw !== "http") {
+      throw new Error(`Invalid OpenCode Remembering config: storage.primary must be "postgres" or "http".`);
+    }
+    primary = primaryRaw;
+  }
+  return { mode, ...(primary ? { primary } : {}), postgres: { dsn: postgresDsn }, http: { url: httpUrl, ...(tokenEnv ? { tokenEnv } : {}), timeoutMs }, json: { path: jsonPath } };
+}
+
 export async function loadConfig(
   directory: string,
 ): Promise<RememberingConfig> {
@@ -243,6 +321,10 @@ export async function loadConfig(
     rawSchema !== undefined
       ? validateSchemaName(rawSchema)
       : await schemaForProject(directory);
+  const projectId = nonEmptyString(process.env.REMEMBERING_PROJECT_ID)
+    ?? nonEmptyString(raw.project_id)
+    ?? nonEmptyString(raw.projectId)
+    ?? undefined;
   const autoInject =
     typeof raw.context?.auto_inject === "boolean"
       ? raw.context.auto_inject
@@ -251,6 +333,8 @@ export async function loadConfig(
   return {
     dsn,
     schema,
+    ...(projectId ? { projectId } : {}),
+    storage: parseStorage(raw, dsn),
     embedding: parseEmbedding(raw),
     retrieval: parseRetrieval(raw),
     context: {

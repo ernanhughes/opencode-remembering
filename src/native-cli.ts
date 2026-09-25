@@ -67,6 +67,15 @@ const engine = new RememberingEngine({
   dsn: config.dsn,
   schema: config.schema,
   projectDirectory: directory,
+  projectId: config.projectId,
+  storage: config.storage ? {
+    mode: config.storage.mode,
+    primary: config.storage.primary,
+    httpUrl: config.storage.http.url,
+    httpTokenEnv: config.storage.http.tokenEnv,
+    httpTimeoutMs: config.storage.http.timeoutMs,
+    jsonPath: config.storage.json.path,
+  } : { mode: "postgres" },
   embedding: {
     provider: config.embedding.provider as "ollama" | "sentence-transformers" | "hashing",
     model: config.embedding.model,

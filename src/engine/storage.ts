@@ -2,6 +2,8 @@ import type { Pool, PoolClient } from "pg";
 
 import { ident, toRegclassParam } from "./db";
 import { EngineError } from "./errors";
+import type { BaselineStorePort, StoreCapabilities } from "./storage/ports";
+import { POSTGRES_CAPABILITIES } from "./storage/ports";
 
 export const SCHEMA_VERSION = "0.1.0";
 export const ENGINE_VERSION = "remembering-engine-v0.1";
@@ -30,12 +32,58 @@ export type ChunkRow = {
 };
 
 /** Port of engine/remembering/baseline/storage.py Store. */
-export class BaselineStore {
+export class BaselineStore implements BaselineStorePort {
+  readonly kind = "postgres" as const;
   constructor(
     private readonly pool: Pool,
     readonly dsn: string,
     readonly schema: string,
   ) {}
+
+  capabilities(): StoreCapabilities {
+    return POSTGRES_CAPABILITIES;
+  }
+
+  async isInitialised(): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      const reg = await client.query("SELECT to_regclass($1)", [`${this.schema}.chunks`]);
+      return reg.rows[0]?.to_regclass != null;
+    } finally {
+      client.release();
+    }
+  }
+
+  async readProjectMeta(): Promise<Record<string, string>> {
+    const client = await this.pool.connect();
+    try {
+      return await readProjectMeta(client, this.schema);
+    } finally {
+      client.release();
+    }
+  }
+
+  async writeProjectMeta(entries: Record<string, string>, overwrite = false): Promise<void> {
+    const s = ident(this.schema);
+    const client = await this.pool.connect();
+    try {
+      for (const [key, value] of Object.entries(entries)) {
+        if (overwrite) {
+          await client.query(
+            `INSERT INTO ${s}.meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+            [key, value],
+          );
+        } else {
+          await client.query(
+            `INSERT INTO ${s}.meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING`,
+            [key, value],
+          );
+        }
+      }
+    } finally {
+      client.release();
+    }
+  }
 
   async initialise(embeddingDim: number): Promise<void> {
     const s = ident(this.schema);
