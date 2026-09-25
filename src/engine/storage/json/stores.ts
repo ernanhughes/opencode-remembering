@@ -23,7 +23,7 @@ import type { ContextTraceRecord } from "../../trace/model";
 import type { LoopEvent } from "../../loops/model";
 import { validateLoopEvent } from "../../loops/model";
 import type { MemoryActionRecord, MemoryRecord } from "../../write/model";
-import { atomicWriteFile, appendJsonLine, ensureDir, readJsonFile, readJsonLines, withFileLock } from "./io";
+import { atomicWriteFile, appendJsonLine, ensureDir, logRecovery, readJsonFile, readJsonLines, recoveryEvents, tornQuarantinedBytes, withFileLock } from "./io";
 import { denseRank, lexicalRank } from "./lexical";
 
 export const JSON_STORE_FORMAT = "remembering-json-v1";
@@ -226,6 +226,8 @@ export class JsonBaselineStore implements BaselineStorePort {
       distinct_embedding_versions: versions.size, distinct_chunkers: new Set(chunks.map((c) => c.chunker)).size,
       embedding_versions: [...versions.entries()].map(([version, n]) => ({ version, chunks: n })),
       fts_index: null, hnsw_index: null,
+      torn_quarantined_bytes: await tornQuarantinedBytes(this.paths.dir),
+      recovery_events: await recoveryEvents(this.paths.dir),
     };
   }
 
@@ -340,39 +342,156 @@ export class JsonLoopStore implements LoopStorePort {
   async count(): Promise<number> { return (await readJsonLines(this.file)).length; }
 }
 
+export type WriteManifest = { format: string; generation: number };
+
+export function writeManifestPath(projectDir: string, configuredPath?: string): string {
+  return path.join(jsonPaths(projectDir, configuredPath).dir, "write-manifest.json");
+}
+
+function writeGenDir(projectDir: string, configuredPath: string | undefined, generation: number): string {
+  return path.join(jsonPaths(projectDir, configuredPath).dir, "write-generations", `gen-${String(generation).padStart(6, "0")}`);
+}
+
 export class JsonWriteStore implements WriteStorePort {
+  private stagingDir: string | null = null;
+
   constructor(private readonly projectDir: string, private readonly configuredPath?: string) {}
   private get paths() { return jsonPaths(this.projectDir, this.configuredPath); }
-  async initialise(): Promise<void> { await ensureDir(this.paths.dir); }
-  private async readRecords(): Promise<MemoryRecord[]> { return readJsonLines<MemoryRecord>(this.paths.records); }
-  private async readActions(): Promise<MemoryActionRecord[]> { return readJsonLines<MemoryActionRecord>(this.paths.actions); }
+
+  /** Current committed file locations (generation files once migrated). */
+  private async currentFiles(): Promise<{ records: string; actions: string }> {
+    const manifest = await readJsonFile<WriteManifest | null>(writeManifestPath(this.projectDir, this.configuredPath), null);
+    if (manifest && manifest.format === JSON_STORE_FORMAT && Number.isInteger(manifest.generation)) {
+      const dir = writeGenDir(this.projectDir, this.configuredPath, manifest.generation);
+      return { records: path.join(dir, "records.jsonl"), actions: path.join(dir, "actions.jsonl") };
+    }
+    // Pre-generation store: flat files (migrated on initialise).
+    return { records: this.paths.records, actions: this.paths.actions };
+  }
+
+  async initialise(): Promise<void> {
+    const { mkdir, readFile, writeFile, copyFile, rm, readdir } = await import("node:fs/promises");
+    await ensureDir(this.paths.dir);
+    // Sweep orphan staging dirs from crashed transactions (visible recovery).
+    try {
+      const genRoot = path.join(this.paths.dir, "write-generations");
+      const entries = await readdir(genRoot).catch(() => [] as string[]);
+      for (const entry of entries) {
+        if (!entry.startsWith("staging-")) continue;
+        await rm(path.join(genRoot, entry), { recursive: true, force: true });
+        await logRecovery(this.paths.dir, "orphan-staging-swept", entry);
+      }
+    } catch { /* sweep best effort */ }
+    const manifestPath = writeManifestPath(this.projectDir, this.configuredPath);
+    const manifest = await readJsonFile<WriteManifest | null>(manifestPath, null);
+    if (manifest) {
+      if (manifest.format !== JSON_STORE_FORMAT) {
+        throw new EngineError("STORE_VERSION_MISMATCH", `JSON write manifest format ${JSON.stringify(manifest.format)} is not ${JSON_STORE_FORMAT}; refusing to guess.`);
+      }
+      return;
+    }
+    // First generation: adopt existing flat files (if any) so upgrade keeps history.
+    const genDir = writeGenDir(this.projectDir, this.configuredPath, 1);
+    await mkdir(genDir, { recursive: true });
+    for (const [from, to] of [
+      [this.paths.records, path.join(genDir, "records.jsonl")],
+      [this.paths.actions, path.join(genDir, "actions.jsonl")],
+    ] as Array<[string, string]>) {
+      try {
+        await copyFile(from, to);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await writeFile(to, "", "utf8");
+      }
+    }
+    // fsync generation files before publishing the manifest.
+    try {
+      for (const f of [path.join(genDir, "records.jsonl"), path.join(genDir, "actions.jsonl")]) {
+        const handle = await (await import("node:fs/promises")).open(f, "r");
+        try { await handle.sync(); } finally { await handle.close(); }
+      }
+    } catch { /* best effort */ }
+    await atomicWriteFile(manifestPath, JSON.stringify({ format: JSON_STORE_FORMAT, generation: 1 }, null, 2));
+    void readFile;
+  }
+
+  private async readRecords(): Promise<MemoryRecord[]> {
+    if (this.stagingDir) return readJsonLines<MemoryRecord>(path.join(this.stagingDir, "records.jsonl"));
+    return readJsonLines<MemoryRecord>((await this.currentFiles()).records);
+  }
+  private async readActions(): Promise<MemoryActionRecord[]> {
+    if (this.stagingDir) return readJsonLines<MemoryActionRecord>(path.join(this.stagingDir, "actions.jsonl"));
+    return readJsonLines<MemoryActionRecord>((await this.currentFiles()).actions);
+  }
   /**
-   * Atomic boundary: snapshot both files, run, restore on failure.
-   * Uses a dedicated txn key so inner putRecord/putAction locks never deadlock.
+   * Crash-atomic commit for explicit-memory writes.
+   *
+   * Mutations run against a staged next-generation copy; the single commit
+   * point is the atomic rename of write-manifest.json. A crash before the
+   * rename leaves the previous generation intact (orphan staging dirs are
+   * swept with a recovery log on the next initialise); a crash after the
+   * rename leaves the complete new generation. Readers never observe a mix
+   * such as actions-updated/records-old.
+   *
+   * Cross-store note: the baseline chunk index for memory:// sources is a
+   * separate store and converges via writeRebuild; refresh never prunes
+   * memory:// sources, so a crash between write-commit and indexing leaves
+   * a committed-but-unindexed record that rebuild re-indexes.
    */
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
     return withFileLock(`${this.paths.dir}:write-txn`, async () => {
-      const { readFile, writeFile } = await import("node:fs/promises");
-      const snapRecords = await readFile(this.paths.records, "utf8").catch(() => null);
-      const snapActions = await readFile(this.paths.actions, "utf8").catch(() => null);
-      try {
-        return await fn();
-      } catch (error) {
+      const { mkdir, copyFile, rm, writeFile } = await import("node:fs/promises");
+      const manifestPath = writeManifestPath(this.projectDir, this.configuredPath);
+      const manifest = await readJsonFile<WriteManifest>(manifestPath, { format: JSON_STORE_FORMAT, generation: 1 });
+      const cur = Number.isInteger(manifest.generation) ? manifest.generation : 1;
+      const genRoot = path.join(this.paths.dir, "write-generations");
+      await mkdir(genRoot, { recursive: true });
+      const staging = path.join(genRoot, `staging-${process.pid}-${Math.floor(Math.random() * 1e9)}`);
+      await mkdir(staging, { recursive: true });
+      const curFiles = await this.currentFiles();
+      for (const [from, to] of [
+        [curFiles.records, path.join(staging, "records.jsonl")],
+        [curFiles.actions, path.join(staging, "actions.jsonl")],
+      ] as Array<[string, string]>) {
         try {
-          if (snapRecords === null) await import("node:fs/promises").then((m) => m.rm(this.paths.records, { force: true }));
-          else await writeFile(this.paths.records, snapRecords, "utf8");
-          if (snapActions === null) await import("node:fs/promises").then((m) => m.rm(this.paths.actions, { force: true }));
-          else await writeFile(this.paths.actions, snapActions, "utf8");
-        } catch { /* restore best effort */ }
+          await copyFile(from, to);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await writeFile(to, "", "utf8");
+        }
+      }
+      this.stagingDir = staging;
+      try {
+        const result = await fn();
+        // Publish: rename staging to the next generation, then flip manifest.
+        const nextDir = writeGenDir(this.projectDir, this.configuredPath, cur + 1);
+        await rm(nextDir, { recursive: true, force: true });
+        const { rename } = await import("node:fs/promises");
+        await rename(staging, nextDir);
+        await atomicWriteFile(manifestPath, JSON.stringify({ format: JSON_STORE_FORMAT, generation: cur + 1 }, null, 2));
+        // Best-effort reclamation of the superseded generation.
+        await rm(writeGenDir(this.projectDir, this.configuredPath, cur), { recursive: true, force: true }).catch(() => {});
+        this.stagingDir = null;
+        return result;
+      } catch (error) {
+        this.stagingDir = null;
+        await rm(staging, { recursive: true, force: true }).catch(() => {});
         throw error;
       }
     });
   }
+  private async activeFiles(): Promise<{ records: string; actions: string }> {
+    if (this.stagingDir) {
+      return { records: path.join(this.stagingDir, "records.jsonl"), actions: path.join(this.stagingDir, "actions.jsonl") };
+    }
+    return this.currentFiles();
+  }
   async putRecord(record: MemoryRecord): Promise<void> {
-    await withFileLock(this.paths.records, async () => {
-      const existing = await this.readRecords();
+    const files = await this.activeFiles();
+    await withFileLock(files.records, async () => {
+      const existing = await readJsonLines<MemoryRecord>(files.records);
       if (existing.some((r) => r.recordId === record.recordId)) return;
-      await appendJsonLine(this.paths.records, record);
+      await appendJsonLine(files.records, record);
     });
   }
   async getRecord(recordId: string): Promise<MemoryRecord | null> {
@@ -383,22 +502,26 @@ export class JsonWriteStore implements WriteStorePort {
   }
   async updateRecordState(recordId: string, state: MemoryRecord["state"]): Promise<void> {
     // Append-only history is preserved in actions; record state is a
-    // materialized projection rewritten atomically (temp+rename).
-    await withFileLock(this.paths.records, async () => {
-      const records = await this.readRecords();
+    // materialized projection rewritten atomically (temp+rename). Inside a
+    // transaction the rewrite lands in the staged generation and only
+    // becomes visible at the manifest flip.
+    const files = await this.activeFiles();
+    await withFileLock(files.records, async () => {
+      const records = await readJsonLines<MemoryRecord>(files.records);
       const next = records.map((r) => (r.recordId === recordId ? { ...r, state } : r));
-      const tmp = `${this.paths.records}.rewrite.tmp`;
+      const tmp = `${files.records}.rewrite.tmp`;
       const { writeFile, rename } = await import("node:fs/promises");
-      await ensureDir(jsonPaths(this.projectDir, this.configuredPath).dir);
+      await ensureDir(path.dirname(files.records));
       await writeFile(tmp, next.map((r) => JSON.stringify(r)).join("\n") + (next.length ? "\n" : ""), "utf8");
-      await rename(tmp, this.paths.records);
+      await rename(tmp, files.records);
     });
   }
   async putAction(action: MemoryActionRecord): Promise<void> {
-    await withFileLock(this.paths.actions, async () => {
-      const existing = await this.readActions();
+    const files = await this.activeFiles();
+    await withFileLock(files.actions, async () => {
+      const existing = await readJsonLines<MemoryActionRecord>(files.actions);
       if (existing.some((a) => a.actionId === action.actionId)) return;
-      await appendJsonLine(this.paths.actions, action);
+      await appendJsonLine(files.actions, action);
     });
   }
   async getAction(actionId: string): Promise<MemoryActionRecord | null> {

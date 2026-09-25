@@ -222,6 +222,7 @@ export class RememberingEngine {
       embeddingDetail = error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200);
     }
     const ok = initialised && schemaIdentityOk && embeddingReachable;
+    const statsRecord = (stats ?? {}) as Record<string, unknown>;
     return {
       ok,
       native: true,
@@ -234,6 +235,8 @@ export class RememberingEngine {
       source_count: stats ? (stats["sources"] ?? null) : null,
       chunk_count: stats ? (stats["chunks"] ?? null) : null,
       chunks: stats ? (stats["chunks"] ?? null) : null,
+      torn_quarantined_bytes: statsRecord["torn_quarantined_bytes"] ?? null,
+      recovery_events: statsRecord["recovery_events"] ?? null,
       embedding_provider_reachable: embeddingReachable,
       embedding_detail: embeddingDetail,
       storage: resolved.selection,
@@ -802,6 +805,8 @@ export class RememberingEngine {
     // through trace-independent means: reuse write store list when available.
     const writeStoreAny = resolved.write as unknown as { listRecords?: () => Promise<Array<{ recordId: string; content: string; role: string; state: string }>> };
     if (typeof writeStoreAny.listRecords === "function") {
+      // listRecords errors propagate (auth/protocol/unreachable); a scan
+      // failure fails visibly rather than reporting "nothing to reindex".
       for (const rec of await writeStoreAny.listRecords()) {
         if ((rec as { state: string }).state !== "active") continue;
         await this.indexExplicitRecord(rec);

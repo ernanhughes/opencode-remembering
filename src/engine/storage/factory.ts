@@ -26,6 +26,8 @@ export type StorageSelection = {
   configuredMode: string;
   primaryBackend: StorageBackendKind | null;
   fallback: boolean;
+  /** Which tier served the request when fallback is true. */
+  fallbackTier?: "secondary" | "json" | null;
   primaryReachable: boolean | null;
   reason: string | null;
 };
@@ -92,7 +94,8 @@ export async function resolveStores(opts: FactoryOptions): Promise<ResolvedStore
       write: new JsonWriteStore(opts.projectDirectory, opts.jsonPath),
       selection: {
         activeBackend: "json", configuredMode, primaryBackend: primaryFor(opts),
-        fallback: configuredMode === "auto", primaryReachable: configuredMode === "auto" ? false : null,
+        fallback: configuredMode === "auto", fallbackTier: configuredMode === "auto" ? "json" : null,
+        primaryReachable: configuredMode === "auto" ? false : null,
         reason: configuredMode === "auto" ? "PRIMARY_UNAVAILABLE_JSON_FALLBACK" : null,
       },
       close: noop,
@@ -133,16 +136,20 @@ export async function resolveStores(opts: FactoryOptions): Promise<ResolvedStore
   }
 
   // auto: deterministic order, one authoritative store per operation.
+  // If the primary is unreachable but a secondary database backend answers,
+  // that is still a fallback: primaryReachable=false keeps health honest.
   const primary = primaryFor(opts) ?? "postgres";
   const order: StorageBackendKind[] = primary === "http"
     ? (opts.httpUrl ? ["http", "postgres"] : ["postgres"])
     : (opts.httpUrl ? ["postgres", "http"] : ["postgres"]);
   let lastError: unknown = null;
+  let primaryFailed = false;
   for (const candidate of order) {
     try {
       if (candidate === "postgres") {
         const pool = await tryPostgres(opts.dsn);
         const close = async () => { await pool.end().catch(() => {}); };
+        const usedFallback = primaryFailed || candidate !== primary;
         return {
           baseline: new BaselineStore(pool, opts.dsn, opts.schema),
           temporal: new PostgresTemporalStore(pool, opts.schema),
@@ -150,13 +157,19 @@ export async function resolveStores(opts: FactoryOptions): Promise<ResolvedStore
           trace: new PostgresTraceStore(pool, opts.schema),
           loop: new PostgresLoopStore(pool, opts.schema),
           write: new PostgresWriteStore(pool, opts.schema),
-          selection: { activeBackend: "postgres", configuredMode, primaryBackend: primary, fallback: false, primaryReachable: true, reason: null },
+          selection: {
+            activeBackend: "postgres", configuredMode, primaryBackend: primary,
+            fallback: usedFallback, fallbackTier: usedFallback ? "secondary" : null,
+            primaryReachable: !primaryFailed,
+            reason: primaryFailed && lastError instanceof EngineError ? lastError.code : null,
+          },
           close,
         };
       }
       if (candidate === "http" && opts.httpUrl) {
         const cfg = { url: opts.httpUrl, token: httpToken(opts.httpTokenEnv), timeoutMs: opts.httpTimeoutMs };
         await tryHttp(opts.httpUrl, opts.httpTokenEnv, opts.httpTimeoutMs, opts.schema);
+        const usedFallback = primaryFailed || candidate !== primary;
         return {
           baseline: new HttpBaselineStore(cfg, opts.schema),
           temporal: new HttpTemporalStore(cfg, opts.schema),
@@ -164,7 +177,12 @@ export async function resolveStores(opts: FactoryOptions): Promise<ResolvedStore
           trace: new HttpTraceStore(cfg, opts.schema),
           loop: new HttpLoopStore(cfg, opts.schema),
           write: new HttpWriteStore(cfg, opts.schema),
-          selection: { activeBackend: "http", configuredMode, primaryBackend: primary, fallback: false, primaryReachable: true, reason: null },
+          selection: {
+            activeBackend: "http", configuredMode, primaryBackend: primary,
+            fallback: usedFallback, fallbackTier: usedFallback ? "secondary" : null,
+            primaryReachable: !primaryFailed,
+            reason: primaryFailed && lastError instanceof EngineError ? lastError.code : null,
+          },
           close: noop,
         };
       }
@@ -175,10 +193,11 @@ export async function resolveStores(opts: FactoryOptions): Promise<ResolvedStore
         throw error;
       }
       lastError = error;
+      primaryFailed = true;
     }
   }
   const json = makeJson();
   const reason = lastError instanceof EngineError ? lastError.code : "PRIMARY_UNAVAILABLE_JSON_FALLBACK";
-  json.selection = { ...json.selection, primaryBackend: primary, fallback: true, primaryReachable: false, reason };
+  json.selection = { ...json.selection, primaryBackend: primary, fallback: true, fallbackTier: "json", primaryReachable: false, reason };
   return json;
 }

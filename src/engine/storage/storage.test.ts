@@ -146,9 +146,34 @@ describe("backend selection", () => {
       });
       expect(resolved.selection.activeBackend).toBe("json");
       expect(resolved.selection.fallback).toBe(true);
+      expect(resolved.selection.fallbackTier).toBe("json");
       expect(resolved.selection.primaryReachable).toBe(false);
       await resolved.close();
     } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("auto secondary win is still reported as fallback", async () => {
+    // Primary postgres is unreachable; the HTTP secondary answers.
+    // Diagnostics must show fallback:true with the primary marked unreachable.
+    const original = globalThis.fetch;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = (async () => Response.json({ ok: true })) as unknown as typeof fetch;
+    const dir = await tempDir();
+    try {
+      const resolved = await resolveStores({
+        mode: "auto", primary: "postgres", dsn: "postgresql://127.0.0.1:1/nope", schema: "remembering_x",
+        projectDirectory: dir, httpUrl: "https://memory.example.com", httpTimeoutMs: 2000, jsonPath: ".remembering/store",
+      });
+      expect(resolved.selection.activeBackend).toBe("http");
+      expect(resolved.selection.primaryBackend).toBe("postgres");
+      expect(resolved.selection.fallback).toBe(true);
+      expect(resolved.selection.fallbackTier).toBe("secondary");
+      expect(resolved.selection.primaryReachable).toBe(false);
+      expect(resolved.selection.reason).toContain("DB_UNREACHABLE");
+      await resolved.close();
+    } finally {
+      globalThis.fetch = original;
       await fs.rm(dir, { recursive: true, force: true });
     }
   });

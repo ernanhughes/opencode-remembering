@@ -109,7 +109,10 @@ export class HttpBaselineStore implements BaselineStorePort {
     return toScored(out.items);
   }
   async denseSearch(vector: number[], k: number): Promise<ScoredChunk[]> {
-    const out = await rpc<{ items: Array<Record<string, unknown>> }>(this.cfg, "remembering_dense_search", { schema: this.schema, query_vector: vector, k });
+    // pgvector casts from the '[v1,v2,...]' literal; send text so PostgREST
+    // maps the argument exactly (see sql/remembering-http-v1.sql).
+    const literal = `[${vector.map((v) => Number(v)).join(",")}]`;
+    const out = await rpc<{ items: Array<Record<string, unknown>> }>(this.cfg, "remembering_dense_search", { schema: this.schema, query_vector: literal, k });
     return toScored(out.items);
   }
   async ensureHnsw(): Promise<boolean> {
@@ -225,10 +228,11 @@ export class HttpWriteStore implements WriteStorePort {
     return out.record;
   }
   async listRecords(): Promise<MemoryRecord[]> {
-    try {
-      const out = await rpc<{ records: MemoryRecord[] }>(this.cfg, "remembering_write_list_records", { schema: this.schema });
-      return out.records;
-    } catch { return []; }
+    // Errors propagate: an auth/protocol/timeout failure must never look
+    // like "there are no records". Callers that tolerate absence (e.g.
+    // writeRebuild scan) catch explicitly.
+    const out = await rpc<{ records: MemoryRecord[] }>(this.cfg, "remembering_write_list_records", { schema: this.schema });
+    return out.records;
   }
   async updateRecordState(recordId: string, state: MemoryRecord["state"]): Promise<void> {
     await rpc(this.cfg, "remembering_write_update_state", { schema: this.schema, record_id: recordId, state });

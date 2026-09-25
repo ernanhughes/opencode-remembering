@@ -205,12 +205,37 @@ injected into model context.
 JSON retrieval is honest: lexical search is a BM25-like scorer; dense search is an
 in-process linear cosine scan over stored embeddings (not HNSW/pgvector). Hybrid
 fusion reuses the same RRF machinery. `memory_health` reports
-`storage: { configured_mode, active_backend, fallback, primary_reachable }` plus
-`capabilities` — fallback is never silent. Security/isolation failures
+`storage: { configured_mode, active_backend, primary_backend, fallback, fallback_tier, primary_reachable, reason }`
+plus `capabilities` — fallback is never silent. `fallback_tier` is `"secondary"`
+when a second database backend answered after the primary failed, and `"json"`
+when the local fallback serves. Security/isolation failures
 (`SCHEMA_MISMATCH`, `STORE_PROJECT_MISMATCH`, `STORE_VERSION_MISMATCH`,
 `HTTP_BACKEND_AUTH`, `CONFIG_INVALID`) fail closed and never fall back to a
 different store. JSON data is never auto-merged back into PostgreSQL; an explicit
 migration command will come later.
+
+### HTTP/PostgREST deployment
+
+`sql/remembering-http-v1.sql` defines every RPC the client uses (45 functions;
+`src/engine/storage/http/contract.test.ts` enforces name-for-name parity between
+`rpc(…, "remembering_*", body)` call sites and `CREATE FUNCTION` signatures,
+including exact argument-name matching, because PostgREST matches request keys to
+argument names). Install it, expose it via PostgREST, and point
+`storage.http.url` at the gateway. Dense search sends the query vector as the
+`'[v1,v2,…]'` literal the `::vector` cast expects.
+
+### JSON durability
+
+Explicit-memory writes commit through generations
+(`write-generations/gen-NNNNNN/` + atomic `write-manifest.json` flip), so a crash
+can never leave a mixed state such as actions-new/records-old: readers only ever
+see the last fully published generation, and orphan staging dirs are swept with a
+visible `recovery.jsonl` entry on the next initialise. Torn JSONL tails (a process
+dying mid-append without a trailing newline) are quarantined to `<file>.torn`
+with the intact prefix preserved; mid-file corruption still fails loudly.
+`memory_health` surfaces `torn_quarantined_bytes` and `recovery_events`.
+Cross-store note: the `memory://` chunk index converges via `writeRebuild`
+(refresh never prunes `memory://` sources).
 
 ## First run
 
