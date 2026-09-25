@@ -164,7 +164,8 @@ export async function withFileLock<T>(key: string, fn: () => Promise<T>): Promis
   const prior = locks.get(key) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => { release = resolve; });
-  locks.set(key, prior.then(() => current));
+  const queued = prior.then(() => current);
+  locks.set(key, queued);
   await prior;
   const store = heldKeys.getStore();
   const next = new Set(store ?? []);
@@ -173,6 +174,11 @@ export async function withFileLock<T>(key: string, fn: () => Promise<T>): Promis
     return await heldKeys.run(next, fn);
   } finally {
     release();
-    if (locks.get(key) === current) locks.delete(key);
+    if (locks.get(key) === queued) locks.delete(key);
   }
+}
+
+/** Test-only visibility into lock bookkeeping (map size, not behavior). */
+export function __lockMapSizeForTests(): number {
+  return locks.size;
 }

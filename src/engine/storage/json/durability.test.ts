@@ -5,7 +5,7 @@ import * as path from "node:path";
 
 process.env.REMEMBERING_ALLOW_TEST_EMBEDDINGS = "1";
 
-import { readJsonLines, appendJsonLine } from "./io";
+import { readJsonLines, appendJsonLine, withFileLock, __lockMapSizeForTests } from "./io";
 import { jsonPaths, JsonWriteStore, JsonBaselineStore } from "./stores";
 import { WriteService } from "../../write/service";
 import { builtinWritePolicy } from "../../write/policy";
@@ -73,6 +73,24 @@ describe("JSONL crash tolerance", () => {
     await fs.appendFile(file, "not json at all\n", "utf8");
     await appendJsonLine(file, { eventId: "b" });
     await expect(readJsonLines(file)).rejects.toThrow("corrupt JSONL");
+  });
+
+  test("completed lock keys do not accumulate in the lock map", async () => {
+    const before = __lockMapSizeForTests();
+    for (let i = 0; i < 25; i++) {
+      await withFileLock(`test-key-${Date.now()}-${i}`, async () => {});
+    }
+    expect(__lockMapSizeForTests()).toBe(before);
+    // Contended locks also clean up: overlapping acquisitions on one key.
+    await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        withFileLock("test-shared-key", async () => {
+          await new Promise((r) => setTimeout(r, 1));
+          return i;
+        }),
+      ),
+    );
+    expect(__lockMapSizeForTests()).toBe(before);
   });
 });
 
