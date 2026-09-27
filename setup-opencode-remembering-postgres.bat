@@ -7,7 +7,7 @@ REM ============================================================
 
 set "PSQL=E:\Program Files\PostgreSQL\16\bin\psql.exe"
 set "SQL_FILE=C:\Projects\opencode-remembering\sql\remembering-http-v1.sql"
-set "MEMORY_BASELINE_DSN=postgresql://postgres:werewolf@localhost:5432/memory_baseline"
+set "MEMORY_BASELINE_DSN=postgresql://memory_baseline:memory_baseline@localhost:5432/memory_baseline"
 
 echo.
 echo ============================================================
