@@ -45,7 +45,7 @@
     "native:search": "bun src/native-cli.ts search"
   },
   "dependencies": {
-    "@opencode/plugin": "^2.0.12"
+    "@opencode/plugin": "^2.0.22"
   },
   "optionalDependencies": {
     "pg": "^8.13.1"
