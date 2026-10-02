@@ -455,6 +455,27 @@ Evaluation:        route-eval + every *-eval above
 
 The product owns its runtime: `bun pm pack` ships compiled `dist/`. Installing requires no research checkout, no `PROJECT_MEMORY_ROOT`, no sibling directory, no interpreter.
 
+## Adjacent capabilities
+
+Remembering owns retained history, recall/influence routing and its traced
+admission path. The context compiler assembles bounded context from explicit
+candidates; a caller may convert memory output into candidates, but this is not
+a direct automatic compiler dependency. `project-context-opencode` transports
+and observes at the host context boundary; capture does not prove memory caused
+an action. Recall remains distinct from present influence.
+
+`opencode-work` lists Remembering integration as FUTURE: retrieved history does
+not automatically change a Work declaration, obligation or acceptance check.
+`opencode-language` is a separate proposed/current-view projection under
+DOCUMENTATION_HOLD; no Remembering integration or canonical runtime composition
+is established. VFS records provenance rather than acting as a memory backend.
+
+Current backend selection is authoritative per operation: postgres/http/json/auto,
+with visible availability-only fallback (including a configured secondary
+database and then JSON). Isolation/security failures fail closed. HANDOFF.md's
+historical “no fallbacks” invariant predates that storage evolution; it remains
+historical provenance, not current backend configuration guidance.
+
 ## Operating boundary
 
 Established: strong hybrid retrieval, deterministic routing, bitemporal resolution, safe framing with fallback, standing-gated trust with revocation inheritance and corroboration, decisive provenance-bearing selection, immutable traceable context, evidence-tested open loops, append-only attributed writes with two-key authority, standalone packaging. Not established: general human-like memory, universal factual correctness, that selected memory caused a downstream action, safe autonomous operation, optimal policies, harmlessness of recalled untrusted text, general metadata extraction from arbitrary prose, or behavioral improvement (Stage 10 has not run).
