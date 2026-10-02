@@ -473,3 +473,15 @@ Established: strong hybrid retrieval, deterministic routing, bitemporal resoluti
 ## What comes next
 
 Stage 10 — Matched Behavioral Evaluation: M0 (no memory) vs M1 (strong hybrid RAG) vs M2 (full remembering) on identical tasks, measuring task success, stale-memory harm, current/historical-state correctness, unsafe-memory influence, unfinished-work and provenance correctness, context size, latency, and action differences separately. No new mechanisms.
+
+## Capability provider
+
+- **Capability:** durable project memory with separate historical recall and present influence.
+- **Interfaces:** OpenCode plugin: ten memory tools and a bounded context hook; native engine library and developer CLI; postgres/http/json/auto storage configuration.
+- **Current maturity:** IMPLEMENTED+TESTED; core FROZEN claim for stages 1–9, with subsequent storage evolution assessed separately.
+- **Evidence:** 22 test files in src/; [HANDOFF.md](HANDOFF.md) records stage evaluations and PG+pgvector+bge-m3 live acceptance. Recorded results were not rerun in this documentation pass.
+- **Known limitations:** Recall does not grant influence, authority or truth; downstream behavioural improvement remains unestablished. HANDOFF’s historical “no fallbacks” invariant predates the implemented storage modes.
+- **Used by:** OpenCode sessions (tools/context hook); opencode-observability (experimental memory-transport measurement). Work integration remains FUTURE in its admission ledger.
+- **Registry:** Language `planning/capability-providers/` (Language-side availability index; this repository is the source of truth for itself).
+- **Evidence snapshot:** Audited 2026-10-02 against commit 6d96d4f8.
+  See repository history and current status for later changes.
