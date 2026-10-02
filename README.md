@@ -493,7 +493,7 @@ Established: strong hybrid retrieval, deterministic routing, bitemporal resoluti
 
 ## What comes next
 
-Stage 10 — Matched Behavioral Evaluation: M0 (no memory) vs M1 (strong hybrid RAG) vs M2 (full remembering) on identical tasks, measuring task success, stale-memory harm, current/historical-state correctness, unsafe-memory influence, unfinished-work and provenance correctness, context size, latency, and action differences separately. No new mechanisms.
+Stage 10 - Matched Behavioral Evaluation: M0 (no memory) vs M1 (strong hybrid RAG) vs M2 (full remembering) on identical tasks, measuring task success, stale-memory harm, current/historical-state correctness, unsafe-memory influence, unfinished-work and provenance correctness, context size, latency, and action differences separately. No new mechanisms.
 
 ## Capability provider
 
