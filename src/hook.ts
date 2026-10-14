@@ -1,5 +1,6 @@
 import type { ProjectMemoryClient, WorkSignalRequest } from "./client";
 import type { RememberingConfig } from "./config";
+import { redactSecrets } from "./redaction";
 import {
   extractSessionFacts,
   isMeaningfulQuery,
@@ -38,7 +39,7 @@ export function extractWorkSignals(
     signals.push({
       signal_id: `signal-user-${session}`,
       kind: "user_message",
-      text: latestUser.text,
+      text: redactSecrets(latestUser.text),
       observed_at: nowIso,
     });
   }
@@ -56,7 +57,7 @@ export function extractWorkSignals(
       ...(message.tool_calls ?? []),
       ...(message.tool_results ?? []),
     ]) {
-      const text = JSON.stringify(part).slice(0, 500);
+      const text = redactSecrets(JSON.stringify(part)).slice(0, 500);
       if (text) toolTexts.push(text);
     }
   }
@@ -75,7 +76,7 @@ export function extractWorkSignals(
     signals.push({
       signal_id: `signal-test-${session}`,
       kind: "test_failure",
-      text: failure.slice(0, 500),
+      text: redactSecrets(failure).slice(0, 500),
       observed_at: nowIso,
     });
   }
@@ -116,7 +117,7 @@ export function buildContextHook(
         });
       } catch (error) {
         console.warn(
-          `[opencode-remembering] session capture failed: ${String(error).slice(0, 200)}`,
+          `[opencode-remembering] session capture failed: ${redactSecrets(String(error)).slice(0, 200)}`,
         );
       }
     }
@@ -155,7 +156,7 @@ export function buildContextHook(
       );
     } catch (error) {
       console.warn(
-        `[opencode-remembering] memory context failed: ${String(error).slice(0, 200)}`,
+        `[opencode-remembering] memory context failed: ${redactSecrets(String(error)).slice(0, 200)}`,
       );
       return;
     }

@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
 import { EngineError } from "./errors";
+import { redactSensitive } from "../redaction";
 
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -40,7 +41,7 @@ function fingerprint(message: SessionMessage): string {
  * File-based session capture. Needs no database: canonical history must
  * survive even when PostgreSQL is down. Transcripts are append-only and
  * deduplicated by message id (or content fingerprint); existing events
- * are never rewritten.
+ * are not rewritten except for security redaction of previously stored secrets.
  */
 export async function captureSession(
   projectDirectory: string,
@@ -85,7 +86,8 @@ export async function captureSession(
         `existing transcript is not valid JSON with an events list; refusing to overwrite canonical history.`,
       );
     }
-    existing = parsed as typeof existing;
+    // Security repair: remove legacy unredacted credentials on the next capture.
+    existing = redactSensitive(parsed as typeof existing);
   } catch (error) {
     if (error instanceof EngineError) throw error;
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -111,7 +113,8 @@ export async function captureSession(
   }
   let recorded = 0;
   let duplicates = 0;
-  for (const message of facts.messages) {
+  for (const rawMessage of facts.messages) {
+    const message = redactSensitive(rawMessage);
     if (!message.text?.trim() && !message.toolCalls?.length && !message.toolResults?.length) {
       duplicates += 1;
       continue;
@@ -134,7 +137,8 @@ export async function captureSession(
     });
     recorded += 1;
   }
-  await writeFile(transcriptPath, JSON.stringify(existing, null, 2), "utf8");
+  // Defence in depth: no raw values may reach the transcript writer.
+  await writeFile(transcriptPath, JSON.stringify(redactSensitive(existing), null, 2), "utf8");
   return {
     ok: true,
     schema,

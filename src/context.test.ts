@@ -128,3 +128,28 @@ describe("extractSessionFacts", () => {
     });
   });
 });
+
+describe("secret-safe context boundaries", () => {
+  test("redacts captured text and structured tool results before storage", () => {
+    const fake = "not-a-real-key-abcdef0123456789";
+    const records = extractCaptureMessages([{
+      role: "tool",
+      parts: [
+        { type: "text", text: "OPENCODE_API_KEY=" + fake },
+        { type: "tool-result", output: { env: { OPENCODE_API_KEY: fake } } },
+      ],
+    }]);
+    expect(JSON.stringify(records)).not.toContain(fake);
+    expect(records[0]!.text).toContain("[REDACTED]");
+    expect(records[0]!.tool_results).toHaveLength(1);
+  });
+
+  test("redacts queries and legacy retrieved memory before injection", () => {
+    const fake = "not-a-real-key-abcdef0123456789";
+    const query = latestUserText([{ role: "user", content: "OPENCODE_API_KEY=" + fake }]);
+    const injected = renderInjectedMemory("trace", "schema", "OPENCODE_API_KEY=" + fake, "recall");
+    expect(query).not.toContain(fake);
+    expect(injected).not.toContain(fake);
+    expect(injected).toContain("[REDACTED]");
+  });
+});

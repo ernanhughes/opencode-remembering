@@ -386,3 +386,21 @@ describe("extractWorkSignals", () => {
     expect(event.system[0]!.text).toContain('frame_control="hard"');
   });
 });
+
+describe("work signal redaction", () => {
+  test("does not retain credentials in tool signals or failure signals", () => {
+    const fake = "not-a-real-key-abcdef0123456789";
+    const signals = extractWorkSignals(
+      { messages: [], system: [] },
+      { messages: [
+        { role: "user", text: "Fix the failing test" },
+        { role: "tool", text: "", tool_results: [
+          { output: "FAILED test, OPENCODE_API_KEY=" + fake },
+        ] },
+      ] },
+      "2026-10-14T00:00:00Z",
+    );
+    expect(JSON.stringify(signals)).not.toContain(fake);
+    expect(signals.some((s) => s.kind === "test_failure")).toBe(true);
+  });
+});

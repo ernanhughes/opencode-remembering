@@ -411,7 +411,9 @@ Operational files (`.remembering/loops/**`, `.remembering/traces/**`, `.remember
 
 ## Session capture
 
-The context hook merges unseen OpenCode messages into `.remembering/sessions/<sessionId>.json` — canonical facts recorded verbatim, never summarized, never rewritten, never duplicated — and the next refresh ingests them as ordinary versioned sources. Capture needs no database, so history survives outages. The hook also extracts current WorkSignals (latest request, task, tool result, test failure) and injects the bounded bundle after stable instructions; any memory failure degrades to no injection rather than breaking the session.
+The context hook merges unseen OpenCode messages into `.remembering/sessions/<sessionId>.json` — canonical facts recorded without summarising, deduplicated, with credential values redacted **before persistence**. Tool inputs/results and common environment-variable, authorization-header, and credential-URL formats are scrubbed. Existing transcripts are also scrubbed when that session is next captured (the only exception to otherwise immutable history). Redaction is best effort: an unlabelled secret in arbitrary prose cannot be reliably recognised. The next refresh ingests the sanitised sessions as ordinary versioned sources. Capture needs no database, so history survives outages. The hook also extracts current WorkSignals (latest request, task, tool result, test failure) and injects the bounded bundle after stable instructions; any memory failure degrades to no injection rather than breaking the session.
+
+**Security note:** The plugin does not retroactively scrub inactive session files, database indexes, backups, OpenCode-owned logs, or Git history. If a real credential reached any of those, revoke/rotate it and clean up the affected artifacts separately. The `.remembering/` directory is ignored by Git, but previously tracked files remain tracked; check `git ls-files .remembering` before publishing.
 
 ## Failure semantics
 
