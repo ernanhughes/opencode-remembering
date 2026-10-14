@@ -34,8 +34,9 @@ export function redactSecrets(text: string): string {
 
   // Bearer/basic schemes inside command output or quoted strings.
   result = result.replace(
-    /\b(Bearer|Basic)([ \t]+)([A-Za-z0-9._~+/=-]{8,})/gi,
-    (_full, scheme: string, spaces: string) => scheme + spaces + REDACTED_SECRET,
+    /\b(Bearer|Basic)([ \t]+)([A-Za-z0-9._~+/=-]{12,})/gi,
+    (full, scheme: string, spaces: string, token: string) =>
+      /[0-9._~+/=-]/.test(token) ? scheme + spaces + REDACTED_SECRET : full,
   );
 
   // Credentials in URLs (the username is useful for troubleshooting).
