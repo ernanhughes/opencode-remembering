@@ -54,7 +54,7 @@ export function redactSecrets(text: string): string {
 
   // Shell environment assignments, env listing tables, and YAML/key-value logs.
   result = result.replace(
-    /\b([A-Za-z_][\w.-]*)([ \t]*(?:=|:)[ \t]*|[ \t]{2,})("(?:\\.|[^"\r\n])*"|'(?:\\.|[^'\r\n])*'|[^\s&;,}\]\r\n]+)/g,
+    /\b([A-Za-z_][\w.-]*)([ \t]*(?:=|:)[ \t]*|[ \t]{2,})(\[REDACTED\]|"(?:\\.|[^"\r\n])*"|'(?:\\.|[^'\r\n])*'|[^\s&;,}\]\r\n]+)/g,
     (full, name: string, separator: string, value: string) => {
       if (!isSensitiveField(name) || value === REDACTED_SECRET) return full;
       const quote = value.startsWith('"') || value.startsWith("'") ? value[0] : "";
