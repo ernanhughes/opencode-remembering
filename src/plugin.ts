@@ -3,6 +3,7 @@ import type { Info as ToolInfo } from "@opencode/plugin/promise/tool";
 
 import { ProjectMemoryClient } from "./client";
 import { loadConfig } from "./config";
+import { redactSecrets } from "./redaction";
 import { buildContextHook, isSecurityFailure } from "./hook";
 import {
   MemoryContext,
@@ -33,18 +34,18 @@ const RememberingPlugin = Plugin.define({
       const health = await client.doctor();
       if (!health.ok) {
         console.warn(
-          `[opencode-remembering] memory not ready: ${health.message ?? "see memory_health"}`,
+          `[opencode-remembering] memory not ready: ${redactSecrets(health.message ?? "see memory_health")}`,
         );
       }
       if (!health.schema_identity_ok) {
         throw new Error(
-          `SCHEMA_MISMATCH: project schema identity check failed: ${health.message ?? ""}`,
+          `SCHEMA_MISMATCH: project schema identity check failed: ${redactSecrets(health.message ?? "")}`,
         );
       }
     } catch (error) {
-      if (isSecurityFailure(error)) throw error;
+      if (isSecurityFailure(error)) throw new Error(redactSecrets(String(error)));
       console.warn(
-        `[opencode-remembering] memory unavailable at startup: ${String(error).slice(0, 300)}`,
+        `[opencode-remembering] memory unavailable at startup: ${redactSecrets(String(error)).slice(0, 300)}`,
       );
     }
 
