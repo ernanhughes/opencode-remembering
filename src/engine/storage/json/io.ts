@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { redactSecrets } from "../../../redaction";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 /** Atomic filesystem helpers for the JSON backend. */
@@ -58,7 +59,7 @@ export async function logRecovery(storeDir: string, kind: string, detail: string
     await ensureDir(storeDir);
     await fs.appendFile(
       path.join(storeDir, "recovery.jsonl"),
-      `${JSON.stringify({ at: new Date().toISOString(), kind, detail })}\n`,
+      `${JSON.stringify({ at: new Date().toISOString(), kind, detail: redactSecrets(detail) })}\n`,
       "utf8",
     );
   } catch { /* diagnostics must never break writes */ }
