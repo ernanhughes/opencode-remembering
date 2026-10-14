@@ -65,3 +65,14 @@ describe("credential redaction", () => {
     expect((output as Record<string, unknown>).self).toBe(REDACTED_SECRET);
   });
 });
+
+test("preserves ordinary authentication prose and adjacent JSON fields", () => {
+  const normal = "Basic Authentication is supported";
+  expect(redactSecrets(normal)).toBe(normal);
+  const fake = "not-a-real-key-abcdef0123456789";
+  const input = '{"headers":{"Authorization":"Bearer ' + fake + '"},"status":"ok"}';
+  const output = redactSecrets(input);
+  expect(output).not.toContain(fake);
+  expect(output).toContain('"status":"ok"');
+  expect(redactSecrets(output)).toBe(output);
+});
