@@ -23,10 +23,19 @@ export function redactSecrets(text: string): string {
   if (!text) return text;
   let result = text;
 
-  // HTTP authorization headers, including basic auth and bearer tokens.
+  // Standalone authorization headers: avoid matching quoted JSON properties.
   result = result.replace(
-    /\b(Authorization|Proxy-Authorization)([ \t]*[:=][ \t]*)(?!\[REDACTED\])[^\r\n]+/gi,
-    (_full, name: string, separator: string) => name + separator + REDACTED_SECRET,
+    /(^[ \t]*)(Authorization|Proxy-Authorization)([ \t]*[:=][ \t]*)([^\r\n]+)/gmi,
+    (full, indent: string, name: string, separator: string, value: string) =>
+      value.trim() === REDACTED_SECRET
+        ? full
+        : indent + name + separator + REDACTED_SECRET,
+  );
+
+  // Bearer/basic schemes inside command output or quoted strings.
+  result = result.replace(
+    /\b(Bearer|Basic)([ \t]+)([A-Za-z0-9._~+/=-]{8,})/gi,
+    (_full, scheme: string, spaces: string) => scheme + spaces + REDACTED_SECRET,
   );
 
   // Credentials in URLs (the username is useful for troubleshooting).
